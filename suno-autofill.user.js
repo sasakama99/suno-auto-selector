@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Suno AutoFill（プリセット自動入力）
 // @namespace    https://github.com/sasakama99/suno-auto-selector
-// @version      1.1.0
+// @version      1.2.0
 // @description  Sunoの作曲フォームにプリセットを保存・自動入力するツール
 // @author       ハリたっく
 // @match        https://suno.com/*
@@ -80,38 +80,51 @@
   }
 
   // ===================================================
-  //  要素検索ユーティリティ
+  //  要素検索ユーティリティ（大文字小文字を無視）
   // ===================================================
 
-  // ラベルテキストを含む行の中から特定テキストのボタンを探す
-  function findButtonInRow(rowLabelText, buttonText) {
-    // ページ内の全要素を走査してラベルを含む親を探す
-    const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_ELEMENT);
-    let node;
-    while ((node = walker.nextNode())) {
-      // 直接のテキストがラベルと一致する要素を探す
-      const directText = Array.from(node.childNodes)
-        .filter(n => n.nodeType === Node.TEXT_NODE)
-        .map(n => n.textContent.trim())
-        .join('');
-      if (directText === rowLabelText) {
-        // この要素の親または祖先でボタンを探す
-        let container = node.parentElement;
-        for (let i = 0; i < 5; i++) {
-          if (!container) break;
-          const buttons = container.querySelectorAll('button, [role="button"], span[class*="btn"], div[class*="btn"]');
-          for (const btn of buttons) {
-            if (btn.textContent.trim() === buttonText) return btn;
-          }
-          container = container.parentElement;
-        }
+  // テキストで要素を見つける（大文字小文字無視・部分一致可）
+  function findElByText(text, selector = '*', exact = true) {
+    const t = text.toLowerCase().trim();
+    for (const el of document.querySelectorAll(selector)) {
+      const elText = el.textContent.trim().toLowerCase();
+      if (exact ? elText === t : elText.startsWith(t)) return el;
+    }
+    return null;
+  }
+
+  // ラベルの近くにあるボタンを探す（大文字小文字無視）
+  function findButtonNearLabel(labelText, btnText) {
+    const lt = labelText.toLowerCase().trim();
+    const bt = btnText.toLowerCase().trim();
+
+    // ラベル要素を探す（大文字小文字無視）
+    let labelEl = null;
+    for (const el of document.querySelectorAll('*')) {
+      const txt = el.textContent.trim().toLowerCase();
+      // 葉ノードまたはテキストが短い要素で一致
+      if ((txt === lt || txt === lt.toUpperCase().toLowerCase()) &&
+          el.children.length <= 2) {
+        labelEl = el;
+        break;
       }
     }
 
-    // フォールバック: テキスト完全一致ボタンを全体から探す
-    const allClickable = document.querySelectorAll('button, [role="button"]');
-    for (const el of allClickable) {
-      if (el.textContent.trim() === buttonText) return el;
+    if (labelEl) {
+      // ラベルの親→祖先を5段階まで辿ってボタンを探す
+      let container = labelEl.parentElement;
+      for (let i = 0; i < 6; i++) {
+        if (!container) break;
+        for (const btn of container.querySelectorAll('button, [role="button"], span, div')) {
+          if (btn.textContent.trim().toLowerCase() === bt) return btn;
+        }
+        container = container.parentElement;
+      }
+    }
+
+    // フォールバック: ページ全体からボタンを探す
+    for (const el of document.querySelectorAll('button, [role="button"]')) {
+      if (el.textContent.trim().toLowerCase() === bt) return el;
     }
     return null;
   }
@@ -154,78 +167,117 @@
   }
 
   // ===================================================
-  //  カスタムスライダー操作
-  //  Sunoのスライダーは独自実装 → ポインターイベントで操作
+  //  Reactファイバー経由でスライダーに値をセット
   // ===================================================
-  function setCustomSlider(labelText, percent) {
-    // ラベルを含む行の中にあるスライダーを探す
-    const container = findSliderContainer(labelText);
-    if (!container) {
-      logDebug(`スライダーコンテナ未検出: ${labelText}`);
-      return false;
-    }
 
-    // input[type="range"] があれば直接セット
-    const rangeInput = container.querySelector('input[type="range"]');
-    if (rangeInput) {
-      const min = parseFloat(rangeInput.min || 0);
-      const max = parseFloat(rangeInput.max || 100);
-      const val = min + (max - min) * (percent / 100);
-      setReactValue(rangeInput, String(val));
-      return true;
-    }
-
-    // カスタムスライダーのトラック要素を探す
-    // Sunoは縦バー（ティック）が並んだカスタムUI
-    const trackCandidates = container.querySelectorAll(
-      '[class*="track"], [class*="Track"], [class*="slider"], [class*="Slider"], [class*="bar"], [class*="Bar"]'
+  // Reactの内部プロパティキーを取得
+  function getReactFiberKey(el) {
+    return Object.keys(el).find(k =>
+      k.startsWith('__reactFiber') ||
+      k.startsWith('__reactInternals') ||
+      k.startsWith('__reactEventHandlers')
     );
-
-    let track = trackCandidates.length > 0 ? trackCandidates[0] : container;
-
-    // コンテナ自体をトラックとして使う（幅が50px以上の要素）
-    for (const el of container.querySelectorAll('*')) {
-      const rect = el.getBoundingClientRect();
-      if (rect.width > 80 && rect.height > 5 && rect.height < 60) {
-        // スライダーらしいアスペクト比
-        track = el;
-        break;
-      }
-    }
-
-    return simulateSliderPointer(track, percent);
   }
 
-  function findSliderContainer(labelText) {
-    // テキストノードでラベルを探す
-    const all = document.querySelectorAll('div, section, label');
-    for (const el of all) {
-      // 子の直接テキストにラベルを含む
-      const text = el.textContent.trim();
-      if (!text.includes(labelText)) continue;
-      if (text.length > labelText.length + 40) continue; // あまり大きすぎる要素は除外
-      // スライダーらしい子要素があるか確認
-      const hasSliderLike = el.querySelector(
-        'input[type="range"], [role="slider"], [class*="slider"], [class*="Slider"]'
-      ) || el.innerHTML.includes('%');
-      if (hasSliderLike) return el;
-    }
-
-    // より広い範囲で探す
-    for (const el of all) {
-      const text = el.textContent.trim();
-      if (text.startsWith(labelText) && text.length < 20) {
-        let p = el.parentElement;
-        for (let i = 0; i < 5; i++) {
-          if (!p) break;
-          if (p.querySelector('input[type="range"], [role="slider"]')) return p;
-          // %表示があるコンテナ
-          if (p.textContent.includes('%')) return p;
-          p = p.parentElement;
+  // Reactファイバーツリーを辿ってonChange等を呼び出す
+  function callReactHandler(el, value) {
+    const key = getReactFiberKey(el);
+    if (!key) return false;
+    let fiber = el[key];
+    while (fiber) {
+      const props = fiber.memoizedProps || fiber.pendingProps;
+      if (props) {
+        // onChangeCommitted(event, value) 形式（MUI系）
+        if (typeof props.onChangeCommitted === 'function') {
+          props.onChangeCommitted(null, value);
+          return true;
+        }
+        // onChange({ target: { value } }) 形式
+        if (typeof props.onChange === 'function') {
+          props.onChange({ target: { value: String(value) }, currentTarget: { value: String(value) } });
+          return true;
+        }
+        // onValueChange(value) 形式（Radix UI系）
+        if (typeof props.onValueChange === 'function') {
+          props.onValueChange(value);
+          return true;
         }
       }
+      fiber = fiber.return;
     }
-    return null;
+    return false;
+  }
+
+  // スライダーをラベルから探して値をセット（全手法を試みる）
+  function setCustomSlider(labelText, percent) {
+    const lt = labelText.toLowerCase();
+
+    // 1) input[type="range"] を全て試す（Reactファイバー経由）
+    for (const inp of document.querySelectorAll('input[type="range"]')) {
+      // 近くにラベルテキストがあるか確認（祖先5段階）
+      let p = inp.parentElement;
+      for (let i = 0; i < 7; i++) {
+        if (!p) break;
+        if (p.textContent.toLowerCase().includes(lt)) {
+          // React経由でセット
+          const min = parseFloat(inp.min || 0);
+          const max = parseFloat(inp.max || 100);
+          const val = min + (max - min) * (percent / 100);
+          // まずReactファイバー
+          if (!callReactHandler(inp, val)) {
+            // フォールバック: ネイティブセッター
+            setReactValue(inp, String(val));
+          }
+          logDebug(`スライダー設定: ${labelText} → ${percent}%`);
+          return true;
+        }
+        p = p.parentElement;
+      }
+    }
+
+    // 2) role="slider" 要素を探す
+    for (const el of document.querySelectorAll('[role="slider"]')) {
+      let p = el.parentElement;
+      for (let i = 0; i < 7; i++) {
+        if (!p) break;
+        if (p.textContent.toLowerCase().includes(lt)) {
+          if (!callReactHandler(el, percent)) {
+            el.setAttribute('aria-valuenow', percent);
+            el.dispatchEvent(new Event('change', { bubbles: true }));
+            simulateSliderPointer(el, percent);
+          }
+          return true;
+        }
+        p = p.parentElement;
+      }
+    }
+
+    // 3) ラベル要素からコンテナを辿ってポインターイベントで操作
+    for (const el of document.querySelectorAll('*')) {
+      if (el.children.length > 2) continue;
+      if (el.textContent.trim().toLowerCase() !== lt) continue;
+      let container = el.parentElement;
+      for (let i = 0; i < 6; i++) {
+        if (!container) break;
+        const sliderEl = container.querySelector('[role="slider"], input[type="range"]');
+        if (sliderEl) {
+          simulateSliderPointer(sliderEl, percent);
+          return true;
+        }
+        // 横長のインタラクティブな要素をトラックとして操作
+        for (const child of container.querySelectorAll('div, span')) {
+          const rect = child.getBoundingClientRect();
+          if (rect.width > 100 && rect.height > 0 && rect.height < 40) {
+            simulateSliderPointer(child, percent);
+            return true;
+          }
+        }
+        container = container.parentElement;
+      }
+    }
+
+    logDebug(`スライダー未検出: ${labelText}`);
+    return false;
   }
 
   function simulateSliderPointer(el, percent) {
@@ -233,72 +285,67 @@
     try {
       const rect = el.getBoundingClientRect();
       if (rect.width === 0) return false;
-
       const x = rect.left + rect.width * (percent / 100);
       const y = rect.top + rect.height / 2;
-
-      const mkEvent = (type) => new PointerEvent(type, {
-        bubbles: true, cancelable: true,
-        clientX: x, clientY: y,
-        pointerId: 1, pressure: type === 'pointerup' ? 0 : 0.5
+      ['pointerdown','pointermove','pointerup'].forEach(type => {
+        el.dispatchEvent(new PointerEvent(type, {
+          bubbles: true, cancelable: true, clientX: x, clientY: y, pointerId: 1,
+          pressure: type === 'pointerup' ? 0 : 0.5
+        }));
       });
-
-      el.dispatchEvent(mkEvent('pointerdown'));
-      el.dispatchEvent(mkEvent('pointermove'));
-      el.dispatchEvent(mkEvent('pointerup'));
-
-      // マウスイベントもフォールバック
-      el.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, clientX: x, clientY: y }));
-      el.dispatchEvent(new MouseEvent('mousemove', { bubbles: true, clientX: x, clientY: y }));
-      el.dispatchEvent(new MouseEvent('mouseup',   { bubbles: true, clientX: x, clientY: y }));
+      ['mousedown','mousemove','mouseup'].forEach(type => {
+        el.dispatchEvent(new MouseEvent(type, { bubbles: true, clientX: x, clientY: y }));
+      });
       return true;
-    } catch (e) {
-      return false;
-    }
+    } catch (e) { return false; }
   }
 
   // ===================================================
-  //  バージョン選択（ドロップダウンメニューを開いて選択）
+  //  バージョン選択（ドロップダウン開いて選択）
+  //  Sunoのバージョン表示例: "v5.5 Pro", "v5 Pro ✓", "v4.5-all"
   // ===================================================
-  // バージョンリスト（UI表示名 → Sunoの表示テキスト）
-  const VERSION_LIST = ['v5.5','v5','v4.5+','v4.5','v4.5-all','v4','v3.5','v3','v2'];
-
   function setVersion(ver) {
     if (!ver) return false;
+    const vl = ver.toLowerCase().trim();
 
-    // 1. 現在のバージョンボタン（v5 ▼ のようなボタン）をクリックしてドロップダウンを開く
-    const versionTriggers = document.querySelectorAll('button, [role="button"]');
-    let triggerClicked = false;
-    for (const btn of versionTriggers) {
-      const t = btn.textContent.trim();
-      // vX.X 形式か、バージョン選択ドロップダウントリガーっぽいボタン
-      if (/^v[\d.]+/.test(t) || t.toLowerCase().includes('version')) {
-        btn.click();
-        triggerClicked = true;
-        break;
+    // Step1: まずドロップダウンが既に開いているか確認 → 開いていなければトリガーをクリック
+    function clickVersionItem() {
+      // ドロップダウン内のアイテムを探す（role=option/menuitem/listitem、li等）
+      const candidates = document.querySelectorAll(
+        '[role="option"], [role="menuitem"], [role="listitem"], li, [class*="option"], [class*="Option"], [class*="item"], [class*="Item"]'
+      );
+      for (const item of candidates) {
+        const t = item.textContent.trim().toLowerCase();
+        // "v5.5 pro" が "v5.5" を含む形でマッチ
+        if (t.startsWith(vl) || t === vl) {
+          item.click();
+          logDebug(`バージョン選択: ${ver}`);
+          return true;
+        }
       }
+      return false;
     }
 
-    // ドロップダウンが開くまで少し待ってから選択
-    setTimeout(() => {
-      const items = document.querySelectorAll('[role="option"], [role="menuitem"], li, [class*="option"], [class*="Option"]');
-      for (const item of items) {
-        const t = item.textContent.trim();
-        if (t.startsWith(ver)) {
-          item.click();
-          return;
-        }
-      }
-      // フォールバック: テキスト完全一致ボタン
-      for (const btn of document.querySelectorAll('button, [role="button"]')) {
-        if (btn.textContent.trim() === ver) {
-          btn.click();
-          return;
-        }
-      }
-    }, 300);
+    // 既にドロップダウンが開いていれば即選択
+    if (clickVersionItem()) return true;
 
-    return true;
+    // ドロップダウントリガーボタンを探す（"v5 ▼" "v4.5" 等）
+    const triggers = document.querySelectorAll('button, [role="button"], [role="combobox"]');
+    for (const btn of triggers) {
+      const t = btn.textContent.trim().toLowerCase();
+      if (/^v[\d.+-]/.test(t) || t.includes('model') || t.includes('version')) {
+        btn.click();
+        // 開いた後に選択
+        setTimeout(() => {
+          if (!clickVersionItem()) {
+            // リトライ
+            setTimeout(clickVersionItem, 200);
+          }
+        }, 200);
+        return true;
+      }
+    }
+    return false;
   }
 
   // ===================================================
@@ -362,22 +409,27 @@
       log.push('Title');
     }
 
-    // Vocal Gender
+    // Vocal Gender（ラベルは "VOCAL GENDER" 等大文字の場合あり）
     if (p.vocalGender === 'male') {
-      const btn = findButtonInRow('Vocal Gender', 'Male');
+      const btn = findButtonNearLabel('Vocal Gender', 'Male');
       if (btn) { btn.click(); log.push('Male'); }
+      else logDebug('Vocal Gender Male ボタン未検出');
     } else if (p.vocalGender === 'female') {
-      const btn = findButtonInRow('Vocal Gender', 'Female');
+      const btn = findButtonNearLabel('Vocal Gender', 'Female');
       if (btn) { btn.click(); log.push('Female'); }
+      else logDebug('Vocal Gender Female ボタン未検出');
     }
+    // 指定なし: 何もしない（Sunoの現状維持）
 
     // Lyrics Mode
     if (p.lyricsMode === 'manual') {
-      const btn = findButtonInRow('Lyrics Mode', 'Manual');
+      const btn = findButtonNearLabel('Lyrics Mode', 'Manual');
       if (btn) { btn.click(); log.push('Manual'); }
+      else logDebug('Lyrics Mode Manual ボタン未検出');
     } else if (p.lyricsMode === 'auto') {
-      const btn = findButtonInRow('Lyrics Mode', 'Auto');
+      const btn = findButtonNearLabel('Lyrics Mode', 'Auto');
       if (btn) { btn.click(); log.push('Auto'); }
+      else logDebug('Lyrics Mode Auto ボタン未検出');
     }
 
     // Weirdness（少し遅延して確実に適用）
