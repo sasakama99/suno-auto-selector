@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Suno AutoFill（プリセット自動入力）
 // @namespace    https://github.com/sasakama99/suno-auto-selector
-// @version      3.0.0
+// @version      3.1.0
 // @description  Sunoの作曲フォームにプリセットを保存・自動入力するツール
 // @author       ハリたっく
 // @match        https://suno.com/*
@@ -106,6 +106,8 @@
   function realClick(el) {
     if (!el) return false;
     try {
+      const txt = (el.textContent || '').trim().slice(0, 30);
+      console.log(`[SunoAutoFill] realClick: <${el.tagName}> "${txt}"`);
       el.scrollIntoView?.({ block: 'center' });
       el.focus?.();
       const r = el.getBoundingClientRect();
@@ -162,32 +164,43 @@
     return null;
   }
 
-  // ラベル要素（テキストが label を含む）の祖先内でボタンを探す
+  // ラベル要素の近傍でボタンを探す（親探索を狭く）
   function findButtonNearLabel(labelText, btnText) {
     const ln = norm(labelText);
-    const bn = norm(btnText);
-    let bestLabel = null;
+    const panel = document.getElementById('suno-af-panel');
 
-    // ラベル要素を見つける
+    // ラベル要素（直接テキストノードに labelText を含む短い要素）
+    let labelEl = null;
     for (const el of document.querySelectorAll('div, span, label, p, h1, h2, h3, h4')) {
-      const t = norm(el.textContent);
-      if (!t.startsWith(ln)) continue;
-      if (t.length > ln.length + 30) continue;
-      if (el.children.length > 4) continue;
-      bestLabel = el;
-      break;
-    }
-
-    if (bestLabel) {
-      let p = bestLabel.parentElement;
-      for (let i = 0; i < 8; i++) {
-        if (!p) break;
-        const found = findClickable(btnText, p);
-        if (found) return found;
-        p = p.parentElement;
+      if (panel && panel.contains(el)) continue;
+      let directText = '';
+      for (const node of el.childNodes) {
+        if (node.nodeType === Node.TEXT_NODE) directText += node.textContent;
+      }
+      const dt = norm(directText);
+      if (dt === ln || dt.startsWith(ln)) {
+        labelEl = el;
+        break;
       }
     }
-    return findClickable(btnText);
+
+    if (labelEl) {
+      // 親を3段階以内に絞る（広すぎ防止）
+      let p = labelEl.parentElement;
+      for (let i = 0; i < 3; i++) {
+        if (!p || (panel && panel.contains(p))) break;
+        const found = findClickable(btnText, p);
+        if (found) {
+          console.log(`[SunoAutoFill] findButtonNearLabel "${labelText}" → "${btnText}" found at depth ${i}`);
+          return found;
+        }
+        p = p.parentElement;
+      }
+      console.log(`[SunoAutoFill] findButtonNearLabel "${labelText}" → "${btnText}" 近傍で見つからず`);
+    } else {
+      console.log(`[SunoAutoFill] findButtonNearLabel ラベル "${labelText}" 未検出`);
+    }
+    return null;
   }
 
   // textarea/inputをplaceholderで探す（自分のパネル内は除外）
@@ -371,12 +384,33 @@
     if (!ver || ver === 'none') return { ok: true, method: 'skip' };
     const panel = document.getElementById('suno-af-panel');
 
-    function clickItem() {
-      // Radix Portal は document.body 直下に出る → body全体を探索
-      // data-radix-collection-item と data-value も対象に
-      const selector = '[data-radix-collection-item], [data-value], [cmdk-item], [role="option"], [role="menuitem"], [role="listitem"]';
+    function diagnoseDropdown() {
+      // ドロップダウン展開後、可視要素で「v」始まりのテキストを持つものを全部ログ
+      const matches = [];
+      for (const el of document.body.querySelectorAll('*')) {
+        if (panel && panel.contains(el)) continue;
+        if (el.children.length > 8) continue;
+        const t = (el.textContent || '').trim();
+        if (!/^v\d/i.test(t)) continue;
+        if (t.length > 100) continue;
+        const rect = el.getBoundingClientRect();
+        if (rect.width === 0) continue;
+        matches.push({
+          tag: el.tagName,
+          role: el.getAttribute('role'),
+          dataValue: el.getAttribute('data-value'),
+          dataRadix: el.hasAttribute('data-radix-collection-item'),
+          dataState: el.getAttribute('data-state'),
+          text: t.slice(0, 60),
+          cls: (el.className || '').toString().slice(0, 50)
+        });
+      }
+      console.log('[SunoAutoFill] ドロップダウン候補:', matches);
+      return matches;
+    }
 
-      // 1) data属性ベースで完全一致を最優先
+    function clickItem() {
+      // 1) data-value 完全一致を最優先
       for (const item of document.body.querySelectorAll('[data-value]')) {
         if (panel && panel.contains(item)) continue;
         const dv = norm(item.getAttribute('data-value') || '');
@@ -390,15 +424,35 @@
       }
 
       // 2) role/data-radix-collection-item で textContent マッチ
+      const selector = '[data-radix-collection-item], [cmdk-item], [role="option"], [role="menuitem"], [role="listitem"]';
       for (const item of document.body.querySelectorAll(selector)) {
         if (panel && panel.contains(item)) continue;
         if (!versionMatch(item.textContent, ver)) continue;
         const rect = item.getBoundingClientRect();
         if (rect.width === 0) continue;
         realClick(item);
-        console.log('[SunoAutoFill] Version item クリック:', norm(item.textContent).slice(0, 60));
+        console.log('[SunoAutoFill] Version item クリック(role):', norm(item.textContent).slice(0, 60));
         return true;
       }
+
+      // 3) フォールバック: 任意の要素で「v5.5」始まりの可視リーフ要素
+      for (const el of document.body.querySelectorAll('div, button, span, li, a')) {
+        if (panel && panel.contains(el)) continue;
+        if (el.children.length > 8) continue;
+        if (!versionMatch(el.textContent, ver)) continue;
+        const rect = el.getBoundingClientRect();
+        if (rect.width === 0 || rect.height === 0) continue;
+        // 可視性チェック
+        const style = getComputedStyle(el);
+        if (style.display === 'none' || style.visibility === 'hidden') continue;
+        if (style.pointerEvents === 'none') continue;
+        realClick(el);
+        console.log('[SunoAutoFill] Version item クリック(fallback):', norm(el.textContent).slice(0, 60), 'tag:', el.tagName);
+        return true;
+      }
+
+      // 何も見つからなければ診断情報を出す
+      diagnoseDropdown();
       return false;
     }
 
