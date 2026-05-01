@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Suno AutoFill（プリセット自動入力）
 // @namespace    https://github.com/sasakama99/suno-auto-selector
-// @version      2.0.0
+// @version      2.1.0
 // @description  Sunoの作曲フォームにプリセットを保存・自動入力するツール
 // @author       ハリたっく
 // @match        https://suno.com/*
@@ -177,80 +177,150 @@
   }
 
   // =========================================================
-  //  スライダー設定
+  //  スライダー設定（Radix UI対応）
+  //  Sunoは role="slider" を使用 → トラック検出 + pointer or キーボード
   // =========================================================
   function setSlider(labelText, percent) {
     const ln = norm(labelText);
 
-    // 戦略1: input[type="range"] でラベル近傍のものを探す
+    // 戦略A: role="slider" を見つけてRadix UI方式で操作
+    for (const thumb of document.querySelectorAll('[role="slider"]')) {
+      let p = thumb.parentElement;
+      let matched = false;
+      for (let i = 0; i < 10; i++) {
+        if (!p) break;
+        if (norm(p.textContent).includes(ln)) { matched = true; break; }
+        p = p.parentElement;
+      }
+      if (!matched) continue;
+
+      // Radix UIスライダーの操作（4つの戦略を順に試す）
+      const r1 = setRadixSliderByKeyboard(thumb, percent);
+      if (r1) return { ok: true, method: 'keyboard' };
+
+      const r2 = setRadixSliderByTrackPointer(thumb, percent);
+      if (r2) return { ok: true, method: 'track-pointer' };
+
+      const r3 = callReactHandler(thumb, percent);
+      if (r3) return { ok: true, method: 'react-handler' };
+
+      simulateThumbPointer(thumb, percent);
+      return { ok: true, method: 'thumb-pointer' };
+    }
+
+    // 戦略B: input[type="range"] でラベル近傍（Weirdnessラベルを含むもの）
     for (const inp of document.querySelectorAll('input[type="range"]')) {
+      // min:0, max:1のシークバーは除外
+      if (parseFloat(inp.max || 0) <= 1) continue;
       let p = inp.parentElement;
       for (let i = 0; i < 10; i++) {
         if (!p) break;
         if (norm(p.textContent).includes(ln)) {
-          const min = parseFloat(inp.min || 0);
-          const max = parseFloat(inp.max || 100);
-          const val = min + (max - min) * (percent / 100);
+          const val = (parseFloat(inp.min || 0)) + (parseFloat(inp.max || 100) - parseFloat(inp.min || 0)) * (percent / 100);
           if (callReactHandler(inp, val)) return { ok: true, method: 'range+react' };
-          if (setNativeValue(inp, String(val))) return { ok: true, method: 'range+native' };
-          return { ok: true, method: 'range+fallback' };
+          setNativeValue(inp, String(val));
+          return { ok: true, method: 'range+native' };
         }
         p = p.parentElement;
-      }
-    }
-
-    // 戦略2: role="slider" 要素
-    for (const el of document.querySelectorAll('[role="slider"]')) {
-      let p = el.parentElement;
-      for (let i = 0; i < 10; i++) {
-        if (!p) break;
-        if (norm(p.textContent).includes(ln)) {
-          if (callReactHandler(el, percent)) return { ok: true, method: 'role+react' };
-          el.setAttribute('aria-valuenow', percent);
-          simulatePointer(el, percent);
-          return { ok: true, method: 'role+pointer' };
-        }
-        p = p.parentElement;
-      }
-    }
-
-    // 戦略3: ラベル要素から辿ってトラックっぽいものを探す
-    for (const el of document.querySelectorAll('div, span, label')) {
-      const t = norm(el.textContent);
-      if (!t.startsWith(ln) || t.length > ln.length + 40) continue;
-      if (el.children.length > 4) continue;
-      let container = el.parentElement;
-      for (let i = 0; i < 8; i++) {
-        if (!container) break;
-        const slider = container.querySelector('[role="slider"], input[type="range"]');
-        if (slider) {
-          if (callReactHandler(slider, percent)) return { ok: true, method: 'parent+react' };
-          simulatePointer(slider, percent);
-          return { ok: true, method: 'parent+pointer' };
-        }
-        container = container.parentElement;
       }
     }
 
     return { ok: false, method: 'not-found' };
   }
 
-  function simulatePointer(el, percent) {
+  // 方法1: キーボードで矢印キーを押して値を変更（Radix UIで最も確実）
+  function setRadixSliderByKeyboard(thumb, target) {
+    try {
+      const current = parseInt(thumb.getAttribute('aria-valuenow') || '50');
+      if (current === target) return true;
+
+      thumb.focus();
+      const diff = target - current;
+      const key = diff > 0 ? 'ArrowRight' : 'ArrowLeft';
+      const code = diff > 0 ? 'ArrowRight' : 'ArrowLeft';
+      const keyCode = diff > 0 ? 39 : 37;
+
+      const press = () => {
+        const evt = new KeyboardEvent('keydown', {
+          key, code, keyCode, which: keyCode,
+          bubbles: true, cancelable: true
+        });
+        thumb.dispatchEvent(evt);
+        const evt2 = new KeyboardEvent('keyup', {
+          key, code, keyCode, which: keyCode,
+          bubbles: true, cancelable: true
+        });
+        thumb.dispatchEvent(evt2);
+      };
+
+      const steps = Math.abs(diff);
+      for (let i = 0; i < steps; i++) press();
+
+      // 値が変わったか確認
+      const after = parseInt(thumb.getAttribute('aria-valuenow') || '0');
+      return Math.abs(after - target) <= 1;
+    } catch (e) { return false; }
+  }
+
+  // 方法2: スライダールートのトラック要素にpointerdownを送る
+  function setRadixSliderByTrackPointer(thumb, percent) {
+    try {
+      // スライダーのルート要素（横長コンテナ）を探す
+      let root = thumb;
+      for (let i = 0; i < 6; i++) {
+        if (!root.parentElement) break;
+        root = root.parentElement;
+        const r = root.getBoundingClientRect();
+        if (r.width > 80 && r.height < 60) break;
+      }
+
+      // トラック候補（rootの中で横長の子要素）
+      let track = root;
+      for (const el of root.querySelectorAll('*')) {
+        const r = el.getBoundingClientRect();
+        if (r.width > 80 && r.height > 0 && r.height < 30) {
+          track = el;
+          break;
+        }
+      }
+
+      const rect = track.getBoundingClientRect();
+      if (rect.width === 0) return false;
+      const x = rect.left + rect.width * (percent / 100);
+      const y = rect.top + rect.height / 2;
+
+      const opts = {
+        bubbles: true, cancelable: true,
+        clientX: x, clientY: y,
+        pointerId: 1, pointerType: 'mouse', isPrimary: true,
+        button: 0, buttons: 1
+      };
+
+      track.dispatchEvent(new PointerEvent('pointerdown', opts));
+      track.dispatchEvent(new MouseEvent('mousedown', opts));
+      // Radix UIは document レベルで pointermove を待つ
+      document.dispatchEvent(new PointerEvent('pointermove', { ...opts, buttons: 1 }));
+      document.dispatchEvent(new MouseEvent('mousemove', { ...opts, buttons: 1 }));
+      document.dispatchEvent(new PointerEvent('pointerup', { ...opts, buttons: 0 }));
+      document.dispatchEvent(new MouseEvent('mouseup', { ...opts, buttons: 0 }));
+
+      // 結果確認
+      const after = parseInt(thumb.getAttribute('aria-valuenow') || '0');
+      return Math.abs(after - percent) <= 2;
+    } catch (e) { return false; }
+  }
+
+  // 方法4: thumb自体にpointerイベント（フォールバック）
+  function simulateThumbPointer(el, percent) {
     if (!el) return;
     try {
       const r = el.getBoundingClientRect();
       if (r.width === 0) return;
       const x = r.left + r.width * (percent / 100);
       const y = r.top + r.height / 2;
-      ['pointerdown', 'pointermove', 'pointerup'].forEach(type =>
-        el.dispatchEvent(new PointerEvent(type, {
-          bubbles: true, cancelable: true,
-          clientX: x, clientY: y, pointerId: 1, pointerType: 'mouse'
-        }))
-      );
-      ['mousedown', 'mousemove', 'mouseup', 'click'].forEach(type =>
-        el.dispatchEvent(new MouseEvent(type, { bubbles: true, cancelable: true, clientX: x, clientY: y }))
-      );
+      const opts = { bubbles: true, cancelable: true, clientX: x, clientY: y, pointerId: 1, pointerType: 'mouse' };
+      ['pointerdown', 'pointermove', 'pointerup'].forEach(t => el.dispatchEvent(new PointerEvent(t, opts)));
+      ['mousedown', 'mousemove', 'mouseup', 'click'].forEach(t => el.dispatchEvent(new MouseEvent(t, opts)));
     } catch (e) {}
   }
 
