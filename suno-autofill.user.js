@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Suno AutoFill（プリセット自動入力）
 // @namespace    https://github.com/sasakama99/suno-auto-selector
-// @version      3.8.1
+// @version      3.9.0
 // @description  Sunoの作曲フォームにプリセットを保存・自動入力するツール
 // @author       ハリたっく
 // @match        https://suno.com/*
@@ -100,6 +100,17 @@
       f = f.return;
     }
     return false;
+  }
+
+  // ボタンがアクティブ（選択済み）か判定
+  function isButtonActive(el) {
+    if (!el) return false;
+    return el.getAttribute('aria-pressed') === 'true' ||
+           el.getAttribute('data-state') === 'on' ||
+           el.getAttribute('data-state') === 'active' ||
+           el.getAttribute('data-active') === 'true' ||
+           el.classList.contains('active') ||
+           el.classList.contains('selected');
   }
 
   // 確実にReactに反応するクリック（pointerdown → mousedown → ... → click）
@@ -230,66 +241,45 @@
   // =========================================================
   async function setSlider(labelText, percent) {
     const ln = norm(labelText);
+    const panel = document.getElementById('suno-af-panel');
 
-    // === input[type="range"] でラベル近傍を最優先（最も確実） ===
-    // 注: range[0] はオーディオプレイヤーなので max>1 でフィルタ
-    const validRanges = [...document.querySelectorAll('input[type="range"]')].filter(r => parseFloat(r.max || 0) > 1);
-
-    for (const inp of validRanges) {
-      let p = inp.parentElement;
-      let matched = false;
-      for (let i = 0; i < 12; i++) {
-        if (!p) break;
-        if (norm(p.textContent).includes(ln)) { matched = true; break; }
-        p = p.parentElement;
-      }
-      if (!matched) continue;
-
-      const val = (parseFloat(inp.min || 0)) + (parseFloat(inp.max || 100) - parseFloat(inp.min || 0)) * (percent / 100);
-      // React handler を呼ぶ
-      if (callReactHandler(inp, val)) {
-        await sleep(50);
-        if (Math.abs(parseFloat(inp.value) - val) <= 2) return { ok: true, method: 'range+react' };
-      }
-      // ネイティブ value setter
-      setNativeValue(inp, String(val));
-      await sleep(50);
-      console.log(`[SunoAutoFill] Range native set: target=${val}, after=${inp.value}`);
-      if (Math.abs(parseFloat(inp.value) - val) <= 2) return { ok: true, method: 'range+native' };
-    }
-
-    // === ラベルマッチに失敗した場合、順番ベースで range フォールバック ===
-    // 0番目=Weirdness, 1番目=Style Influence と仮定
-    let orderRange = null;
-    if (ln === 'weirdness' && validRanges.length >= 1) orderRange = validRanges[0];
-    else if (ln === 'style influence' && validRanges.length >= 2) orderRange = validRanges[1];
-
-    if (orderRange) {
-      const val = percent;
-      if (callReactHandler(orderRange, val)) {
-        await sleep(50);
-        if (Math.abs(parseFloat(orderRange.value) - val) <= 2) return { ok: true, method: 'order+react' };
-      }
-      setNativeValue(orderRange, String(val));
-      await sleep(50);
-      console.log(`[SunoAutoFill] Order range set: target=${val}, after=${orderRange.value}`);
-      if (Math.abs(parseFloat(orderRange.value) - val) <= 2) return { ok: true, method: 'order+native' };
-    }
-
-    // === 最後の手段: role="slider" でキーボード/ポインター ===
-    for (const thumb of document.querySelectorAll('[role="slider"]')) {
-      let p = thumb.parentElement;
-      let matched = false;
+    // role="slider" をラベル近傍で探す（input[type="range"] は偽陽性が多いためスキップ）
+    let thumb = null;
+    for (const el of document.querySelectorAll('[role="slider"]')) {
+      if (panel && panel.contains(el)) continue;
+      let p = el.parentElement;
       for (let i = 0; i < 10; i++) {
         if (!p) break;
-        if (norm(p.textContent).includes(ln)) { matched = true; break; }
+        if (norm(p.textContent).includes(ln)) { thumb = el; break; }
         p = p.parentElement;
       }
-      if (!matched) continue;
-
-      if (setRadixSliderByKeyboard(thumb, percent)) return { ok: true, method: 'keyboard' };
-      if (setRadixSliderByTrackPointer(thumb, percent)) return { ok: true, method: 'track-pointer' };
+      if (thumb) break;
     }
+
+    // ラベルマッチ失敗 → 順番ベース（Weirdness=0, Style Influence=1）
+    if (!thumb) {
+      const allThumbs = [...document.querySelectorAll('[role="slider"]')]
+        .filter(el => !(panel && panel.contains(el)));
+      if (ln === 'weirdness' && allThumbs[0]) thumb = allThumbs[0];
+      else if (ln === 'styleinfluence' && allThumbs[1]) thumb = allThumbs[1];
+      else if (ln.includes('influence') && allThumbs[1]) thumb = allThumbs[1];
+    }
+
+    if (!thumb) {
+      console.log(`[SunoAutoFill] setSlider: thumb not found for "${labelText}"`);
+      return { ok: false, method: 'no-thumb' };
+    }
+
+    // 方法①: トラッククリック（ポインターイベント）
+    if (setRadixSliderByTrackPointer(thumb, percent)) {
+      await sleep(80);
+      const after = parseInt(thumb.getAttribute('aria-valuenow') || '-1');
+      console.log(`[SunoAutoFill] track-pointer: target=${percent}, aria-valuenow=${after}`);
+      if (after >= 0 && Math.abs(after - percent) <= 2) return { ok: true, method: 'track-pointer' };
+    }
+
+    // 方法②: キーボード（Home → ArrowRight×N）
+    if (setRadixSliderByKeyboard(thumb, percent)) return { ok: true, method: 'keyboard' };
 
     return { ok: false, method: 'all-failed' };
   }
@@ -309,17 +299,17 @@
         bubbles: true, cancelable: true
       }));
 
-      // target回 ArrowRight を押す
+      // target回 ArrowRight を keydown+keyup ペアで押す
       for (let i = 0; i < target; i++) {
         thumb.dispatchEvent(new KeyboardEvent('keydown', {
           key: 'ArrowRight', code: 'ArrowRight', keyCode: 39, which: 39,
           bubbles: true, cancelable: true
         }));
+        thumb.dispatchEvent(new KeyboardEvent('keyup', {
+          key: 'ArrowRight', code: 'ArrowRight', keyCode: 39, which: 39,
+          bubbles: true, cancelable: true
+        }));
       }
-      thumb.dispatchEvent(new KeyboardEvent('keyup', {
-        key: 'ArrowRight', code: 'ArrowRight', keyCode: 39, which: 39,
-        bubbles: true, cancelable: true
-      }));
 
       const after = parseInt(thumb.getAttribute('aria-valuenow') || '0');
       console.log(`[SunoAutoFill] Slider keyboard: target=${target}, after=${after}`);
@@ -327,27 +317,37 @@
     } catch (e) { return false; }
   }
 
-  // 方法2: スライダールートのトラック要素にpointerdownを送る
+  // 方法2: スライダートラック要素にポインターイベントを送る
   function setRadixSliderByTrackPointer(thumb, percent) {
     try {
       // スライダーのルート要素（横長コンテナ）を探す
       let root = thumb;
-      for (let i = 0; i < 6; i++) {
+      for (let i = 0; i < 8; i++) {
         if (!root.parentElement) break;
         root = root.parentElement;
         const r = root.getBoundingClientRect();
-        if (r.width > 80 && r.height < 60) break;
+        if (r.width > 100 && r.height < 80) break;
       }
 
-      // トラック候補（rootの中で横長の子要素）
-      let track = root;
+      // トラック候補: data-radix 属性 → orientation 属性 → サイズで推定
+      let track = null;
       for (const el of root.querySelectorAll('*')) {
-        const r = el.getBoundingClientRect();
-        if (r.width > 80 && r.height > 0 && r.height < 30) {
-          track = el;
-          break;
+        const attrs = el.getAttributeNames().join(' ');
+        if (attrs.includes('radix-slider-track') || attrs.includes('slider-track')) {
+          track = el; break;
+        }
+        if (el.getAttribute('data-orientation') === 'horizontal') {
+          track = el; break;
         }
       }
+      if (!track) {
+        // サイズ推定：幅>100かつ高さ<30の最初の子要素
+        for (const el of root.querySelectorAll('*')) {
+          const r = el.getBoundingClientRect();
+          if (r.width > 100 && r.height > 0 && r.height < 30) { track = el; break; }
+        }
+      }
+      if (!track) track = root;
 
       const rect = track.getBoundingClientRect();
       if (rect.width === 0) return false;
@@ -361,18 +361,21 @@
         button: 0, buttons: 1
       };
 
+      // pointerdown → pointermove → pointerup をトラックと document 両方に送る
       track.dispatchEvent(new PointerEvent('pointerdown', opts));
       track.dispatchEvent(new MouseEvent('mousedown', opts));
-      // Radix UIは document レベルで pointermove を待つ
+      track.dispatchEvent(new PointerEvent('pointermove', { ...opts, buttons: 1 }));
       document.dispatchEvent(new PointerEvent('pointermove', { ...opts, buttons: 1 }));
       document.dispatchEvent(new MouseEvent('mousemove', { ...opts, buttons: 1 }));
+      track.dispatchEvent(new PointerEvent('pointerup', { ...opts, buttons: 0 }));
       document.dispatchEvent(new PointerEvent('pointerup', { ...opts, buttons: 0 }));
       document.dispatchEvent(new MouseEvent('mouseup', { ...opts, buttons: 0 }));
 
-      // 結果確認
-      const after = parseInt(thumb.getAttribute('aria-valuenow') || '0');
-      return Math.abs(after - percent) <= 2;
-    } catch (e) { return false; }
+      return true; // aria-valuenow の確認は呼び出し元で行う
+    } catch (e) {
+      console.log('[SunoAutoFill] setRadixSliderByTrackPointer error:', e);
+      return false;
+    }
   }
 
   // 方法4: thumb自体にpointerイベント（フォールバック）
@@ -682,7 +685,16 @@
     results.push(['Title',   title ? setNativeValue(title, p.songTitle || '') : false]);
 
     // ボタン系（realClick で確実に反応させる）
-    if (p.vocalGender === 'male') {
+    if (p.vocalGender === 'none') {
+      // 現在アクティブな性別ボタンを OFF にする（トグル）
+      for (const txt of ['Male', 'Female']) {
+        const b = findButtonNearLabel('Vocal Gender', txt);
+        if (b && isButtonActive(b)) {
+          results.push([`${txt}→OFF`, realClick(b)]);
+          break;
+        }
+      }
+    } else if (p.vocalGender === 'male') {
       const b = findButtonNearLabel('Vocal Gender', 'Male');
       results.push(['Male',   b ? realClick(b) : false]);
     } else if (p.vocalGender === 'female') {
