@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Suno AutoFill（プリセット自動入力）
 // @namespace    https://github.com/sasakama99/suno-auto-selector
-// @version      3.12.0
+// @version      3.13.0
 // @description  Sunoの作曲フォームにプリセットを保存・自動入力するツール
 // @author       ハリたっく
 // @match        https://suno.com/*
@@ -291,32 +291,48 @@
     const ln = norm(labelText);
     const panel = document.getElementById('suno-af-panel');
 
-    // role="slider" をラベル近傍で探す（input[type="range"] は偽陽性が多いためスキップ）
+    // Radix Slider のサムを探す
+    // data-radix-slider-thumb 属性を優先 → なければ role="slider" で検索
+    // ※オーディオプレイヤーのシークバー（幅広・別ラベル）を除外するため
+    //   親要素テキストは5段まで・200文字以内でマッチ
+    const thumbCandidates = [
+      ...document.querySelectorAll('[data-radix-slider-thumb]'),
+      ...document.querySelectorAll('[role="slider"]')
+    ].filter((el, i, arr) => {
+      if (panel && panel.contains(el)) return false;
+      if (arr.indexOf(el) !== i) return false; // 重複除去
+      // オーディオプレイヤー系を除外（aria-label に seek/time/audio/progress 含む）
+      const label = norm(el.getAttribute('aria-label') || '');
+      if (/seek|time|audio|progress|volume/.test(label)) return false;
+      return true;
+    });
+
     let thumb = null;
-    for (const el of document.querySelectorAll('[role="slider"]')) {
-      if (panel && panel.contains(el)) continue;
+    for (const el of thumbCandidates) {
       let p = el.parentElement;
-      for (let i = 0; i < 10; i++) {
+      for (let i = 0; i < 5; i++) {
         if (!p) break;
-        if (norm(p.textContent).includes(ln)) { thumb = el; break; }
+        const txt = norm(p.textContent);
+        // テキストが短い（=ラベル近傍）かつ対象キーワードを含む場合のみマッチ
+        if (txt.length < 300 && txt.includes(ln)) { thumb = el; break; }
         p = p.parentElement;
       }
       if (thumb) break;
     }
 
-    // ラベルマッチ失敗 → 順番ベース（Weirdness=0, Style Influence=1）
+    // ラベルマッチ失敗 → 順番ベース
+    // Weirdness=先頭, Style Influence=2番目（オーディオプレイヤー除外済みリストから）
     if (!thumb) {
-      const allThumbs = [...document.querySelectorAll('[role="slider"]')]
-        .filter(el => !(panel && panel.contains(el)));
-      if (ln === 'weirdness' && allThumbs[0]) thumb = allThumbs[0];
-      else if (ln === 'styleinfluence' && allThumbs[1]) thumb = allThumbs[1];
-      else if (ln.includes('influence') && allThumbs[1]) thumb = allThumbs[1];
+      if (ln === 'weirdness' && thumbCandidates[0]) thumb = thumbCandidates[0];
+      else if ((ln === 'styleinfluence' || ln.includes('influence')) && thumbCandidates[1]) thumb = thumbCandidates[1];
     }
 
     if (!thumb) {
       console.log(`[SunoAutoFill] setSlider: thumb not found for "${labelText}"`);
       return { ok: false, method: 'no-thumb' };
     }
+    console.log(`[SunoAutoFill] setSlider: "${labelText}" → thumb aria-valuenow=${thumb.getAttribute('aria-valuenow')}, label="${thumb.getAttribute('aria-label')}"`);
+
 
     // 方法①: キーボード相対移動（サムをクリックしてフォーカス→ArrowKey）
     if (await setRadixSliderRelative(thumb, percent)) return { ok: true, method: 'keyboard-rel' };
@@ -393,23 +409,47 @@
     }
   }
 
-  // キーボード相対移動（現在値からの差分でArrowKeyを送る）
+  // キーボード移動（Home→0→ArrowRight×N の絶対移動方式）
   async function setRadixSliderRelative(thumb, percent) {
     try {
+      // tabindex がなければ追加してフォーカス可能にする
+      if (!thumb.hasAttribute('tabindex')) thumb.setAttribute('tabindex', '0');
       thumb.focus();
-      await sleep(30);
+      await sleep(50);
 
-      const current = parseInt(thumb.getAttribute('aria-valuenow') || '50');
-      const delta = percent - current;
-      if (delta === 0) return true;
-      const key = delta > 0 ? 'ArrowRight' : 'ArrowLeft';
-      for (let i = 0; i < Math.abs(delta); i++) {
-        thumb.dispatchEvent(new KeyboardEvent('keydown', { key, bubbles: true, cancelable: true }));
-        thumb.dispatchEvent(new KeyboardEvent('keyup',   { key, bubbles: true, cancelable: true }));
+      const kd = (key, keyCode) => new KeyboardEvent('keydown', { key, keyCode, which: keyCode, bubbles: true, cancelable: true });
+      const ku = (key, keyCode) => new KeyboardEvent('keyup',   { key, keyCode, which: keyCode, bubbles: true, cancelable: true });
+
+      // Home キーで 0 に戻す
+      const before = parseInt(thumb.getAttribute('aria-valuenow') ?? '50');
+      thumb.dispatchEvent(kd('Home', 36));
+      thumb.dispatchEvent(ku('Home', 36));
+      await sleep(60);
+      const atZero = parseInt(thumb.getAttribute('aria-valuenow') ?? before.toString());
+      const homeWorked = atZero !== before || before === 0;
+      console.log(`[SunoAutoFill] keyboard: before=${before}, atZero=${atZero}, homeWorked=${homeWorked}`);
+
+      if (homeWorked) {
+        // 絶対移動: 0 → percent 回 ArrowRight
+        for (let i = 0; i < percent; i++) {
+          thumb.dispatchEvent(kd('ArrowRight', 39));
+          thumb.dispatchEvent(ku('ArrowRight', 39));
+        }
+      } else {
+        // Home が効かなかった → 現在値から相対移動
+        const delta = percent - before;
+        if (delta === 0) return true;
+        const key = delta > 0 ? 'ArrowRight' : 'ArrowLeft';
+        const code = delta > 0 ? 39 : 37;
+        for (let i = 0; i < Math.abs(delta); i++) {
+          thumb.dispatchEvent(kd(key, code));
+          thumb.dispatchEvent(ku(key, code));
+        }
       }
-      await sleep(80);
-      const after = parseInt(thumb.getAttribute('aria-valuenow') || '-1');
-      console.log(`[SunoAutoFill] keyboard-rel: target=${percent}, after=${after}`);
+
+      await sleep(100);
+      const after = parseInt(thumb.getAttribute('aria-valuenow') ?? '-1');
+      console.log(`[SunoAutoFill] keyboard-abs: target=${percent}, after=${after}`);
       return after >= 0 && Math.abs(after - percent) <= 2;
     } catch (e) { return false; }
   }
@@ -459,19 +499,11 @@
         if (r.width > 100 && r.height < 80) break;
       }
 
-      // トラック候補: data-radix 属性 → orientation 属性 → サイズで推定
-      let track = null;
-      for (const el of root.querySelectorAll('*')) {
-        const attrs = el.getAttributeNames().join(' ');
-        if (attrs.includes('radix-slider-track') || attrs.includes('slider-track')) {
-          track = el; break;
-        }
-        if (el.getAttribute('data-orientation') === 'horizontal') {
-          track = el; break;
-        }
-      }
+      // トラック候補: data-radix-slider-track → data-orientation → サイズ推定
+      let track = root.querySelector('[data-radix-slider-track]')
+                || root.querySelector('[data-orientation="horizontal"]')
+                || null;
       if (!track) {
-        // サイズ推定：幅>100かつ高さ<30の最初の子要素
         for (const el of root.querySelectorAll('*')) {
           const r = el.getBoundingClientRect();
           if (r.width > 100 && r.height > 0 && r.height < 30) { track = el; break; }
@@ -893,8 +925,8 @@
       results.push(['Auto',   b ? realClick(b) : false]);
     }
 
-    // スライダー（少し遅延）
-    await sleep(300);
+    // スライダー（MoreOptions が完全にレンダリングされるまで待機）
+    await sleep(800);
     if (p.weirdness !== undefined) {
       const r = await setSlider('Weirdness', p.weirdness);
       results.push([`Weirdness(${r.method})`, r.ok]);
