@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Suno AutoFill（プリセット自動入力）
 // @namespace    https://github.com/sasakama99/suno-auto-selector
-// @version      2.2.0
+// @version      2.3.0
 // @description  Sunoの作曲フォームにプリセットを保存・自動入力するツール
 // @author       ハリたっく
 // @match        https://suno.com/*
@@ -121,16 +121,18 @@
     }
   }
 
-  // テキストでクリック可能要素を探す（正規化マッチ）
+  // テキストでクリック可能要素を探す（自分のパネル内は除外）
   function findClickable(text, scope = document) {
     const target = norm(text);
     if (!target) return null;
+    const panel = document.getElementById('suno-af-panel');
     const els = scope.querySelectorAll('button, [role="button"], [role="tab"], [role="option"], [role="menuitem"], [role="radio"]');
     for (const el of els) {
+      if (panel && panel.contains(el)) continue;
       if (norm(el.textContent) === target) return el;
     }
-    // フォールバック: divやspanでクリック可能なもの
     for (const el of scope.querySelectorAll('div, span, li')) {
+      if (panel && panel.contains(el)) continue;
       if (norm(el.textContent) === target && el.children.length <= 2) {
         const rect = el.getBoundingClientRect();
         if (rect.width > 0 && rect.height > 0) return el;
@@ -167,9 +169,11 @@
     return findClickable(btnText);
   }
 
-  // textarea/inputをplaceholderで探す
+  // textarea/inputをplaceholderで探す（自分のパネル内は除外）
   function findByPlaceholder(keywords, tag = 'textarea') {
+    const panel = document.getElementById('suno-af-panel');
     for (const el of document.querySelectorAll(tag)) {
+      if (panel && panel.contains(el)) continue; // パネル内のinputは除外
       const ph = norm(el.placeholder || '');
       if (keywords.some(k => ph.includes(k))) return el;
     }
@@ -360,47 +364,43 @@
 
   // =========================================================
   //  More Options セクションを展開
+  //  すでに開いていれば何もしない（誤って閉じないように）
   // =========================================================
   async function expandMoreOptions() {
-    // "More Options" のテキストを持つクリック可能要素を探す
-    const candidates = document.querySelectorAll('button, [role="button"], div[class*="header"], div[class*="Header"], h1, h2, h3, h4, h5, span');
+    // 判定はSunoのExclude入力が存在するかで行う（パネルのテキストに惑わされないため）
+    // パネル要素を判定から除外する
+    const panel = document.getElementById('suno-af-panel');
+
+    function isExpanded() {
+      // suno-af-panel 内のExcludeは無視
+      for (const inp of document.querySelectorAll('input')) {
+        if (panel && panel.contains(inp)) continue;
+        const ph = norm(inp.placeholder || '');
+        if (ph.includes('exclude')) return true;
+      }
+      return false;
+    }
+
+    // 既に開いていれば何もしない
+    if (isExpanded()) return true;
+
+    // More Options 要素を探す（パネル外限定）
+    const candidates = document.querySelectorAll('button, [role="button"], div[class*="header"], div[class*="Header"], h1, h2, h3, h4, h5, span, div');
     for (const el of candidates) {
+      if (panel && panel.contains(el)) continue; // パネル内は除外
       const t = norm(el.textContent);
-      // "more options" を含む短いテキスト
       if (t.includes('more options') && t.length < 30) {
-        // 既に展開されているか判定（次の兄弟要素 or 内部に "exclude" や "vocal gender" があるか）
-        const alreadyOpen = !!findByPlaceholder(['exclude'], 'input') ||
-                            document.body.textContent.toLowerCase().includes('vocal gender');
-        if (alreadyOpen) {
-          // すでに開いている場合は念のため、Exclude inputが本当にあるか確認
-          if (findByPlaceholder(['exclude'], 'input')) return true;
-        }
-        // クリックして展開
         el.click();
         await sleep(400);
-        // 確認
-        if (findByPlaceholder(['exclude'], 'input')) return true;
-        // 親もクリックしてみる
-        if (el.parentElement) {
+        if (isExpanded()) return true;
+        // 親も試す
+        if (el.parentElement && !panel?.contains(el.parentElement)) {
           el.parentElement.click();
           await sleep(400);
-          if (findByPlaceholder(['exclude'], 'input')) return true;
+          if (isExpanded()) return true;
         }
       }
     }
-
-    // SVGの▽アイコン（chevron）の親をクリック
-    for (const svg of document.querySelectorAll('svg')) {
-      const parent = svg.closest('button, [role="button"]');
-      if (!parent) continue;
-      const t = norm(parent.textContent);
-      if (t.includes('more options') || t === '' && parent.previousElementSibling?.textContent?.toLowerCase().includes('more options')) {
-        parent.click();
-        await sleep(400);
-        if (findByPlaceholder(['exclude'], 'input')) return true;
-      }
-    }
-
     return false;
   }
 
