@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Suno AutoFill（プリセット自動入力）
 // @namespace    https://github.com/sasakama99/suno-auto-selector
-// @version      3.3.0
+// @version      3.4.0
 // @description  Sunoの作曲フォームにプリセットを保存・自動入力するツール
 // @author       ハリたっく
 // @match        https://suno.com/*
@@ -428,13 +428,9 @@
     }
 
     function clickItem(skipEl) {
-      // skipEl（トリガーボタン）と aria-haspopup を持つ要素は誤クリック防止
+      // skipEl（トリガーボタン）のみ完全一致で除外（子孫を含めない）
       function isTrigger(el) {
-        if (!el) return false;
-        if (skipEl && (el === skipEl || skipEl.contains(el) || el.contains(skipEl))) return true;
-        if (el.hasAttribute('aria-haspopup')) return true;
-        if (el.getAttribute('aria-expanded') === 'true' && el.tagName === 'BUTTON') return true;
-        return false;
+        return el === skipEl;
       }
 
       // 1) data-value 完全一致を最優先
@@ -690,6 +686,14 @@
     // 適用後の状態
     const finalState = isMoreOptionsExpanded();
     console.log(`[SunoAutoFill] applyPreset 終了時 MoreOpt=${finalState ? 'OPEN' : 'CLOSED'}`);
+
+    // 適用中に More Options が閉じてしまった場合は再展開（安全ネット）
+    if (expanded && !finalState) {
+      console.log('[SunoAutoFill] More Options が閉じたため再展開します');
+      await sleep(200);
+      const reopened = await expandMoreOptions();
+      results.push(['MoreOptions再展開', reopened]);
+    }
 
     // クリック監視を解除して全クリックを表示
     document.removeEventListener('click', clickListener, true);
