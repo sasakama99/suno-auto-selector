@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Suno AutoFill（プリセット自動入力）
 // @namespace    https://github.com/sasakama99/suno-auto-selector
-// @version      3.7.1
+// @version      3.8.0
 // @description  Sunoの作曲フォームにプリセットを保存・自動入力するツール
 // @author       ハリたっく
 // @match        https://suno.com/*
@@ -529,32 +529,63 @@
     return true;
   }
 
+  function findMoreOptionsButton() {
+    const panel = document.getElementById('suno-af-panel');
+    for (const btn of document.querySelectorAll('button, [role="button"], div, span, h3, h4, section')) {
+      if (panel && panel.contains(btn)) continue;
+      const t = norm(btn.textContent);
+      if ((t === 'more options' || t.startsWith('more options')) && t.length < 25) {
+        const r = btn.getBoundingClientRect();
+        if (r.width > 0 && r.height > 0) return btn;
+      }
+    }
+    return null;
+  }
+
+  function findSongTitleInput() {
+    const panel = document.getElementById('suno-af-panel');
+    for (const inp of document.querySelectorAll('input')) {
+      if (panel && panel.contains(inp)) continue;
+      const ph = norm(inp.placeholder || '');
+      if (ph.includes('song title') || ph.includes('title')) return inp;
+    }
+    return null;
+  }
+
   function isMoreOptionsExpanded() {
     const panel = document.getElementById('suno-af-panel');
 
-    // 【最優先】More Options ボタンの aria-expanded 属性をチェック
+    // 【最優先1】aria-expanded 属性
     for (const btn of document.querySelectorAll('button, [role="button"], [aria-expanded]')) {
       if (panel && panel.contains(btn)) continue;
       const t = norm(btn.textContent);
-      if (t === 'more options' || t.startsWith('more options')) {
+      if ((t === 'more options' || t.startsWith('more options')) && t.length < 25) {
         const expanded = btn.getAttribute('aria-expanded');
         if (expanded === 'true') return true;
         if (expanded === 'false') return false;
       }
     }
 
-    // 判定1: 可視のExcludeインプット
-    for (const el of document.querySelectorAll('input, textarea')) {
-      if (panel && panel.contains(el)) continue;
-      if (!isVisible(el)) continue;
-      const ph = norm(el.placeholder || el.getAttribute('aria-label') || '');
-      if (ph.includes('exclude')) return true;
+    // 【最優先2】位置ベース判定: More Options ボタンと Song Title の距離
+    const moBtn = findMoreOptionsButton();
+    const titleInp = findSongTitleInput();
+    if (moBtn && titleInp) {
+      const moBottom = moBtn.getBoundingClientRect().bottom;
+      const titleTop = titleInp.getBoundingClientRect().top;
+      const gap = titleTop - moBottom;
+      // 100px 以上の隙間があれば、間にコンテンツがある = 展開済み
+      if (gap > 100) return true;
+      if (gap < 60) return false;
+      // 中間値はフォールバックへ
     }
 
-    // 判定2: 可視のSunoスライダー
-    for (const el of document.querySelectorAll('[role="slider"]')) {
+    // フォールバック: Excludeインプットの可視性
+    for (const el of document.querySelectorAll('input, textarea')) {
       if (panel && panel.contains(el)) continue;
-      if (isVisible(el)) return true;
+      const rect = el.getBoundingClientRect();
+      if (rect.width === 0 || rect.height === 0) continue;
+      const ph = norm(el.placeholder || el.getAttribute('aria-label') || '');
+      if (ph.includes('exclude')) return true;
     }
 
     return false;
