@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Suno AutoFill（プリセット自動入力）
 // @namespace    https://github.com/sasakama99/suno-auto-selector
-// @version      3.5.0
+// @version      3.6.0
 // @description  Sunoの作曲フォームにプリセットを保存・自動入力するツール
 // @author       ハリたっく
 // @match        https://suno.com/*
@@ -562,40 +562,33 @@
     }
 
     const panel = document.getElementById('suno-af-panel');
-
-    // "More Options" を含むクリック候補（パネル外限定）
     const candidates = [];
 
-    // 1. button / role=button の中で "More Options" が完全一致 or 始まる短いもの
-    for (const el of document.querySelectorAll('button, [role="button"]')) {
+    // "More Options" 候補要素を集める
+    for (const el of document.querySelectorAll('button, [role="button"], div, section, h3, h4, span')) {
       if (panel && panel.contains(el)) continue;
       const t = norm(el.textContent);
-      if ((t === 'more options' || t.startsWith('more options')) && t.length < 25) {
-        candidates.push(el);
+      if ((t === 'more options' || t.startsWith('more options')) &&
+          t.length < 25 && el.children.length <= 6) {
+        if (isVisible(el)) candidates.push(el);
       }
     }
 
-    // 2. 上で見つからなければ div/section/h3/h4 を見る
-    if (candidates.length === 0) {
-      for (const el of document.querySelectorAll('div, section, h3, h4, span')) {
-        if (panel && panel.contains(el)) continue;
-        const t = norm(el.textContent);
-        if ((t === 'more options' || t.startsWith('more options')) &&
-            t.length < 25 && el.children.length <= 5) {
-          candidates.push(el);
-        }
-      }
-    }
+    console.log(`[SunoAutoFill] More Options 候補:${candidates.length}個`);
+    candidates.slice(0, 5).forEach((c, i) => {
+      console.log(`  [${i}] <${c.tagName}> "${(c.textContent || '').trim().slice(0, 30)}"`);
+    });
 
-    console.log('[SunoAutoFill] More Options 候補:', candidates.length, '個');
-
-    // 候補を realClick → 展開を確認（親はクリックしない！トグル誤動作防止）
+    // 候補を順にクリック → 0.3秒×6回確認（最大1.8秒待つ）
     for (const target of candidates) {
+      console.log(`[SunoAutoFill] More Options クリック試行: <${target.tagName}>`);
       realClick(target);
-      await sleep(700);
-      if (isMoreOptionsExpanded()) {
-        console.log('[SunoAutoFill] 展開成功:', target.tagName);
-        return true;
+      for (let i = 0; i < 6; i++) {
+        await sleep(300);
+        if (isMoreOptionsExpanded()) {
+          console.log(`[SunoAutoFill] 展開成功 (${(i+1)*300}ms後)`);
+          return true;
+        }
       }
     }
     console.log('[SunoAutoFill] More Options 展開失敗');
@@ -687,15 +680,31 @@
     }
 
     // 適用後の状態
-    const finalState = isMoreOptionsExpanded();
+    let finalState = isMoreOptionsExpanded();
     console.log(`[SunoAutoFill] applyPreset 終了時 MoreOpt=${finalState ? 'OPEN' : 'CLOSED'}`);
 
-    // 適用中に More Options が閉じてしまった場合は再展開（安全ネット）
-    if (expanded && !finalState) {
-      console.log('[SunoAutoFill] More Options が閉じたため再展開します');
-      await sleep(200);
-      const reopened = await expandMoreOptions();
-      results.push(['MoreOptions再展開', reopened]);
+    // 閉じていたら最大3回まで再展開を試みる
+    if (!finalState) {
+      for (let attempt = 1; attempt <= 3; attempt++) {
+        console.log(`[SunoAutoFill] More Options 再展開試行 ${attempt}/3`);
+        await sleep(400);
+        const reopened = await expandMoreOptions();
+        if (reopened) {
+          // 再展開後、安定するまで監視（500ms間隔で2回チェック）
+          await sleep(500);
+          if (isMoreOptionsExpanded()) {
+            await sleep(500);
+            if (isMoreOptionsExpanded()) {
+              console.log(`[SunoAutoFill] More Options 再展開成功＋安定 (試行${attempt})`);
+              results.push(['MoreOptions再展開', true]);
+              finalState = true;
+              break;
+            }
+          }
+          console.log('[SunoAutoFill] 再展開後すぐに閉じた → リトライ');
+        }
+      }
+      if (!finalState) results.push(['MoreOptions再展開', false]);
     }
 
     // クリック監視を解除して全クリックを表示
@@ -715,6 +724,26 @@
       : `⚠️ 成功${okCount}件 / 失敗: ${failed.join(', ')}`;
     showToast(msg, 4000);
     console.log('[SunoAutoFill] 適用結果:', results);
+  }
+
+  // More Options を一定時間開いた状態でキープ（閉じたら即座に再展開）
+  let keepOpenTimer = null;
+  function keepMoreOptionsOpen(durationMs) {
+    if (keepOpenTimer) clearTimeout(keepOpenTimer);
+    const startTime = Date.now();
+
+    async function watchAndReopen() {
+      if (Date.now() - startTime > durationMs) {
+        console.log('[SunoAutoFill] keepMoreOptionsOpen 終了');
+        return;
+      }
+      if (!isMoreOptionsExpanded()) {
+        console.log('[SunoAutoFill] keepOpen: 閉じたので再展開');
+        await expandMoreOptions();
+      }
+      keepOpenTimer = setTimeout(watchAndReopen, 500);
+    }
+    watchAndReopen();
   }
 
   function showToast(msg, dur = 2500) {
@@ -1007,9 +1036,15 @@
       syncDefaultUI();
     };
 
-    document.getElementById('af-apply').onclick = () => {
+    document.getElementById('af-apply').onclick = async () => {
       collectForm(currentPreset);
-      applyPreset(currentPreset);
+      await applyPreset(currentPreset);
+
+      // 適用後10秒間は More Options を「開いた状態でキープ」する
+      const wasOpen = isMoreOptionsExpanded();
+      if (wasOpen) {
+        keepMoreOptionsOpen(10000);
+      }
     };
 
     document.getElementById('af-detect').onclick = detectElements;
