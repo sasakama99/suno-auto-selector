@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Suno AutoFill（プリセット自動入力）
 // @namespace    https://github.com/sasakama99/suno-auto-selector
-// @version      2.1.0
+// @version      2.2.0
 // @description  Sunoの作曲フォームにプリセットを保存・自動入力するツール
 // @author       ハリたっく
 // @match        https://suno.com/*
@@ -359,6 +359,52 @@
   }
 
   // =========================================================
+  //  More Options セクションを展開
+  // =========================================================
+  async function expandMoreOptions() {
+    // "More Options" のテキストを持つクリック可能要素を探す
+    const candidates = document.querySelectorAll('button, [role="button"], div[class*="header"], div[class*="Header"], h1, h2, h3, h4, h5, span');
+    for (const el of candidates) {
+      const t = norm(el.textContent);
+      // "more options" を含む短いテキスト
+      if (t.includes('more options') && t.length < 30) {
+        // 既に展開されているか判定（次の兄弟要素 or 内部に "exclude" や "vocal gender" があるか）
+        const alreadyOpen = !!findByPlaceholder(['exclude'], 'input') ||
+                            document.body.textContent.toLowerCase().includes('vocal gender');
+        if (alreadyOpen) {
+          // すでに開いている場合は念のため、Exclude inputが本当にあるか確認
+          if (findByPlaceholder(['exclude'], 'input')) return true;
+        }
+        // クリックして展開
+        el.click();
+        await sleep(400);
+        // 確認
+        if (findByPlaceholder(['exclude'], 'input')) return true;
+        // 親もクリックしてみる
+        if (el.parentElement) {
+          el.parentElement.click();
+          await sleep(400);
+          if (findByPlaceholder(['exclude'], 'input')) return true;
+        }
+      }
+    }
+
+    // SVGの▽アイコン（chevron）の親をクリック
+    for (const svg of document.querySelectorAll('svg')) {
+      const parent = svg.closest('button, [role="button"]');
+      if (!parent) continue;
+      const t = norm(parent.textContent);
+      if (t.includes('more options') || t === '' && parent.previousElementSibling?.textContent?.toLowerCase().includes('more options')) {
+        parent.click();
+        await sleep(400);
+        if (findByPlaceholder(['exclude'], 'input')) return true;
+      }
+    }
+
+    return false;
+  }
+
+  // =========================================================
   //  プリセット適用
   // =========================================================
   async function applyPreset(name) {
@@ -366,6 +412,10 @@
     if (!p) return showResult([['プリセットなし', false]]);
 
     const results = [];
+
+    // 【重要】More Options を展開（隠れたフィールドにアクセスするため）
+    const expanded = await expandMoreOptions();
+    results.push(['MoreOptions展開', expanded]);
 
     // テキスト系
     const lyrics = findByPlaceholder(['lyrics', 'instrumental'], 'textarea');
