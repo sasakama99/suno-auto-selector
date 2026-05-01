@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Suno AutoFill（プリセット自動入力）
 // @namespace    https://github.com/sasakama99/suno-auto-selector
-// @version      3.1.0
+// @version      3.2.0
 // @description  Sunoの作曲フォームにプリセットを保存・自動入力するツール
 // @author       ハリたっく
 // @match        https://suno.com/*
@@ -228,10 +228,55 @@
   //  スライダー設定（Radix UI対応）
   //  Sunoは role="slider" を使用 → トラック検出 + pointer or キーボード
   // =========================================================
-  function setSlider(labelText, percent) {
+  async function setSlider(labelText, percent) {
     const ln = norm(labelText);
 
-    // 戦略A: role="slider" を見つけてRadix UI方式で操作
+    // === input[type="range"] でラベル近傍を最優先（最も確実） ===
+    // 注: range[0] はオーディオプレイヤーなので max>1 でフィルタ
+    const validRanges = [...document.querySelectorAll('input[type="range"]')].filter(r => parseFloat(r.max || 0) > 1);
+
+    for (const inp of validRanges) {
+      let p = inp.parentElement;
+      let matched = false;
+      for (let i = 0; i < 12; i++) {
+        if (!p) break;
+        if (norm(p.textContent).includes(ln)) { matched = true; break; }
+        p = p.parentElement;
+      }
+      if (!matched) continue;
+
+      const val = (parseFloat(inp.min || 0)) + (parseFloat(inp.max || 100) - parseFloat(inp.min || 0)) * (percent / 100);
+      // React handler を呼ぶ
+      if (callReactHandler(inp, val)) {
+        await sleep(50);
+        if (Math.abs(parseFloat(inp.value) - val) <= 2) return { ok: true, method: 'range+react' };
+      }
+      // ネイティブ value setter
+      setNativeValue(inp, String(val));
+      await sleep(50);
+      console.log(`[SunoAutoFill] Range native set: target=${val}, after=${inp.value}`);
+      if (Math.abs(parseFloat(inp.value) - val) <= 2) return { ok: true, method: 'range+native' };
+    }
+
+    // === ラベルマッチに失敗した場合、順番ベースで range フォールバック ===
+    // 0番目=Weirdness, 1番目=Style Influence と仮定
+    let orderRange = null;
+    if (ln === 'weirdness' && validRanges.length >= 1) orderRange = validRanges[0];
+    else if (ln === 'style influence' && validRanges.length >= 2) orderRange = validRanges[1];
+
+    if (orderRange) {
+      const val = percent;
+      if (callReactHandler(orderRange, val)) {
+        await sleep(50);
+        if (Math.abs(parseFloat(orderRange.value) - val) <= 2) return { ok: true, method: 'order+react' };
+      }
+      setNativeValue(orderRange, String(val));
+      await sleep(50);
+      console.log(`[SunoAutoFill] Order range set: target=${val}, after=${orderRange.value}`);
+      if (Math.abs(parseFloat(orderRange.value) - val) <= 2) return { ok: true, method: 'order+native' };
+    }
+
+    // === 最後の手段: role="slider" でキーボード/ポインター ===
     for (const thumb of document.querySelectorAll('[role="slider"]')) {
       let p = thumb.parentElement;
       let matched = false;
@@ -242,38 +287,11 @@
       }
       if (!matched) continue;
 
-      // Radix UIスライダーの操作（成功確認付き）
       if (setRadixSliderByKeyboard(thumb, percent)) return { ok: true, method: 'keyboard' };
       if (setRadixSliderByTrackPointer(thumb, percent)) return { ok: true, method: 'track-pointer' };
-      if (callReactHandler(thumb, percent)) {
-        const after = parseInt(thumb.getAttribute('aria-valuenow') || '0');
-        if (Math.abs(after - percent) <= 2) return { ok: true, method: 'react-handler' };
-      }
-      // 最後の手段は試すが成功扱いしない
-      simulateThumbPointer(thumb, percent);
-      const finalCheck = parseInt(thumb.getAttribute('aria-valuenow') || '0');
-      if (Math.abs(finalCheck - percent) <= 2) return { ok: true, method: 'thumb-pointer' };
-      return { ok: false, method: 'failed' };
     }
 
-    // 戦略B: input[type="range"] でラベル近傍（Weirdnessラベルを含むもの）
-    for (const inp of document.querySelectorAll('input[type="range"]')) {
-      // min:0, max:1のシークバーは除外
-      if (parseFloat(inp.max || 0) <= 1) continue;
-      let p = inp.parentElement;
-      for (let i = 0; i < 10; i++) {
-        if (!p) break;
-        if (norm(p.textContent).includes(ln)) {
-          const val = (parseFloat(inp.min || 0)) + (parseFloat(inp.max || 100) - parseFloat(inp.min || 0)) * (percent / 100);
-          if (callReactHandler(inp, val)) return { ok: true, method: 'range+react' };
-          setNativeValue(inp, String(val));
-          return { ok: true, method: 'range+native' };
-        }
-        p = p.parentElement;
-      }
-    }
-
-    return { ok: false, method: 'not-found' };
+    return { ok: false, method: 'all-failed' };
   }
 
   // 方法1: Home で 0 に戻してから ArrowRight 連打（Radix UI で最も確実）
@@ -478,10 +496,13 @@
     realClick(triggerBtn);
     console.log('[SunoAutoFill] Version trigger クリック:', norm(triggerBtn.textContent));
     triggerClicked = true;
-    await sleep(600);
+    await sleep(700);
+
+    // 開いた直後の状態を診断（必ず実行）
+    diagnoseDropdown();
 
     if (clickItem()) return { ok: true, method: 'trigger' };
-    await sleep(500);
+    await sleep(600);
     if (clickItem()) return { ok: true, method: 'trigger-late' };
 
     console.log('[SunoAutoFill] Version item を見つけられず');
@@ -579,6 +600,15 @@
 
     const results = [];
 
+    // 全クリックを監視（More Optionsが閉じる原因調査）
+    const clickLog = [];
+    const clickListener = (e) => {
+      const t = (e.target?.textContent || '').trim().slice(0, 40);
+      const tag = e.target?.tagName;
+      clickLog.push(`<${tag}> "${t}"`);
+    };
+    document.addEventListener('click', clickListener, true);
+
     // More Options を自動展開（閉じている場合のみ）
     const expanded = await expandMoreOptions();
     results.push(['MoreOptions展開', expanded]);
@@ -626,11 +656,11 @@
     // スライダー（少し遅延）
     await sleep(300);
     if (p.weirdness !== undefined) {
-      const r = setSlider('Weirdness', p.weirdness);
+      const r = await setSlider('Weirdness', p.weirdness);
       results.push([`Weirdness(${r.method})`, r.ok]);
     }
     if (p.styleInfluence !== undefined) {
-      const r = setSlider('Style Influence', p.styleInfluence);
+      const r = await setSlider('Style Influence', p.styleInfluence);
       results.push([`Influence(${r.method})`, r.ok]);
     }
 
@@ -639,6 +669,10 @@
       const r = await setVersion(p.version);
       results.push([`Version(${r.method})`, r.ok]);
     }
+
+    // クリック監視を解除して全クリックを表示
+    document.removeEventListener('click', clickListener, true);
+    console.log('[SunoAutoFill] 適用中の全クリック:', clickLog);
 
     showResult(results);
   }
