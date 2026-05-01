@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Suno AutoFill（プリセット自動入力）
 // @namespace    https://github.com/sasakama99/suno-auto-selector
-// @version      2.3.0
+// @version      2.4.0
 // @description  Sunoの作曲フォームにプリセットを保存・自動入力するツール
 // @author       ハリたっく
 // @match        https://suno.com/*
@@ -173,11 +173,21 @@
   function findByPlaceholder(keywords, tag = 'textarea') {
     const panel = document.getElementById('suno-af-panel');
     for (const el of document.querySelectorAll(tag)) {
-      if (panel && panel.contains(el)) continue; // パネル内のinputは除外
+      if (panel && panel.contains(el)) continue;
       const ph = norm(el.placeholder || '');
       if (keywords.some(k => ph.includes(k))) return el;
     }
     return null;
+  }
+
+  // パネル外の textarea/input を順番取得
+  function getSunoTextareas() {
+    const panel = document.getElementById('suno-af-panel');
+    return [...document.querySelectorAll('textarea')].filter(t => !panel || !panel.contains(t));
+  }
+  function getSunoInputs() {
+    const panel = document.getElementById('suno-af-panel');
+    return [...document.querySelectorAll('input')].filter(t => !panel || !panel.contains(t));
   }
 
   // =========================================================
@@ -363,42 +373,18 @@
   }
 
   // =========================================================
-  //  More Options セクションを展開
-  //  すでに開いていれば何もしない（誤って閉じないように）
+  //  More Options が開いているか確認のみ（自動クリックしない）
   // =========================================================
-  async function expandMoreOptions() {
-    // 判定はSunoのExclude入力が存在するかで行う（パネルのテキストに惑わされないため）
-    // パネル要素を判定から除外する
+  function isMoreOptionsExpanded() {
+    // Suno の Exclude プレースホルダの input が存在 = 展開済み
+    if (findByPlaceholder(['exclude'], 'input')) return true;
+    // または "Vocal Gender" "Lyrics Mode" "Weirdness" のラベルがパネル外に存在
     const panel = document.getElementById('suno-af-panel');
-
-    function isExpanded() {
-      // suno-af-panel 内のExcludeは無視
-      for (const inp of document.querySelectorAll('input')) {
-        if (panel && panel.contains(inp)) continue;
-        const ph = norm(inp.placeholder || '');
-        if (ph.includes('exclude')) return true;
-      }
-      return false;
-    }
-
-    // 既に開いていれば何もしない
-    if (isExpanded()) return true;
-
-    // More Options 要素を探す（パネル外限定）
-    const candidates = document.querySelectorAll('button, [role="button"], div[class*="header"], div[class*="Header"], h1, h2, h3, h4, h5, span, div');
-    for (const el of candidates) {
-      if (panel && panel.contains(el)) continue; // パネル内は除外
+    for (const el of document.querySelectorAll('div, span, label, p')) {
+      if (panel && panel.contains(el)) continue;
       const t = norm(el.textContent);
-      if (t.includes('more options') && t.length < 30) {
-        el.click();
-        await sleep(400);
-        if (isExpanded()) return true;
-        // 親も試す
-        if (el.parentElement && !panel?.contains(el.parentElement)) {
-          el.parentElement.click();
-          await sleep(400);
-          if (isExpanded()) return true;
-        }
+      if (t.startsWith('weirdness') || t.startsWith('vocal gender') || t.startsWith('lyrics mode')) {
+        if (t.length < 30) return true;
       }
     }
     return false;
@@ -413,20 +399,32 @@
 
     const results = [];
 
-    // 【重要】More Options を展開（隠れたフィールドにアクセスするため）
-    const expanded = await expandMoreOptions();
-    results.push(['MoreOptions展開', expanded]);
+    // More Options 展開チェック（自動クリックはしない）
+    const expanded = isMoreOptionsExpanded();
+    if (!expanded) {
+      results.push(['⚠️ More Options 未展開', false]);
+    }
 
-    // テキスト系
-    const lyrics = findByPlaceholder(['lyrics', 'instrumental'], 'textarea');
+    // === Lyrics: placeholderマッチ → 1番目のtextareaフォールバック ===
+    const sunoTextareas = getSunoTextareas();
+    let lyrics = findByPlaceholder(['lyrics', 'instrumental'], 'textarea');
+    if (!lyrics && sunoTextareas.length >= 1) lyrics = sunoTextareas[0];
+    console.log('[SunoAutoFill] Lyrics target:', lyrics?.placeholder, lyrics);
     results.push(['Lyrics',  lyrics ? setNativeValue(lyrics, p.lyrics || '') : false]);
 
-    const styles = findByPlaceholder(['style', 'genre', 'mood'], 'textarea');
+    // === Styles: placeholderマッチ → 2番目のtextareaフォールバック ===
+    let styles = findByPlaceholder(['style', 'genre', 'mood'], 'textarea');
+    if (!styles && sunoTextareas.length >= 2) styles = sunoTextareas[1];
+    console.log('[SunoAutoFill] Styles target:', styles?.placeholder, styles);
     results.push(['Styles',  styles ? setNativeValue(styles, p.styles || '') : false]);
 
+    // Exclude（More Options が展開されていないと無い）
     const exclude = findByPlaceholder(['exclude'], 'input');
-    results.push(['Exclude', exclude ? setNativeValue(exclude, p.excludeStyles || '') : false]);
+    if (p.excludeStyles) {
+      results.push(['Exclude', exclude ? setNativeValue(exclude, p.excludeStyles) : false]);
+    }
 
+    // Title
     const title = findByPlaceholder(['song title', 'title'], 'input');
     results.push(['Title',   title ? setNativeValue(title, p.songTitle || '') : false]);
 
