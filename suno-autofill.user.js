@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Suno AutoFill（プリセット自動入力）
 // @namespace    https://github.com/sasakama99/suno-auto-selector
-// @version      2.5.0
+// @version      2.6.0
 // @description  Sunoの作曲フォームにプリセットを保存・自動入力するツール
 // @author       ハリたっく
 // @match        https://suno.com/*
@@ -347,15 +347,24 @@
     const panel = document.getElementById('suno-af-panel');
 
     function clickItem() {
-      const sel = '[role="option"], [role="menuitem"], [role="listitem"], li';
-      for (const item of document.querySelectorAll(sel)) {
+      // 多様なセレクタで試す（Sunoのドロップダウン実装に幅広く対応）
+      const all = document.querySelectorAll('[role="option"], [role="menuitem"], [role="listitem"], li, [class*="option"], [class*="Option"], [class*="item"], [class*="Item"], div, button, span');
+      for (const item of all) {
         if (panel && panel.contains(item)) continue;
         const t = norm(item.textContent);
-        if (t.startsWith(vn)) {
-          item.click();
-          console.log('[SunoAutoFill] Version item クリック:', t);
-          return true;
-        }
+        // 完全一致か "v5 " で始まる（"v5.5"を誤認しないように）
+        const exactStart = t === vn || t.startsWith(vn + ' ');
+        if (!exactStart) continue;
+        // 短すぎず長すぎない（メニュー項目）
+        if (t.length > 100) continue;
+        // 表示されているか
+        const rect = item.getBoundingClientRect();
+        if (rect.width === 0 || rect.height === 0) continue;
+        // 子要素が多すぎる場合スキップ（外側の親っぽい）
+        if (item.children.length > 6) continue;
+        item.click();
+        console.log('[SunoAutoFill] Version item クリック:', t.slice(0, 50), 'tag:', item.tagName);
+        return true;
       }
       return false;
     }
@@ -386,14 +395,33 @@
   //  More Options 展開判定 & 自動展開
   // =========================================================
   function isMoreOptionsExpanded() {
-    // Suno の Exclude プレースホルダの input が存在 = 展開済み
-    if (findByPlaceholder(['exclude'], 'input')) return true;
-    // または "Weirdness" のラベルがパネル外に存在
     const panel = document.getElementById('suno-af-panel');
+
+    // 判定1: Excludeのinput/textareaが存在
+    for (const el of document.querySelectorAll('input, textarea')) {
+      if (panel && panel.contains(el)) continue;
+      const ph = norm(el.placeholder || el.getAttribute('aria-label') || '');
+      if (ph.includes('exclude')) return true;
+    }
+
+    // 判定2: Sunoの[role="slider"]がパネル外に存在 = Weirdness/Style Influenceがある
+    for (const el of document.querySelectorAll('[role="slider"]')) {
+      if (panel && panel.contains(el)) continue;
+      return true;
+    }
+
+    // 判定3: 葉ノードのラベル（直接のテキストノード）で完全一致
     for (const el of document.querySelectorAll('div, span, label, p')) {
       if (panel && panel.contains(el)) continue;
-      const t = norm(el.textContent);
-      if (t === 'weirdness' || t === 'vocal gender' || t === 'lyrics mode') return true;
+      // 子要素がある場合は直接のテキストノードのみ取得
+      let directText = '';
+      for (const node of el.childNodes) {
+        if (node.nodeType === Node.TEXT_NODE) directText += node.textContent;
+      }
+      const dt = norm(directText);
+      if (dt === 'weirdness' || dt === 'vocal gender' || dt === 'lyrics mode' || dt === 'style influence') {
+        return true;
+      }
     }
     return false;
   }
