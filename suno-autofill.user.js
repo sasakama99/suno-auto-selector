@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Suno AutoFill（プリセット自動入力）
 // @namespace    https://github.com/sasakama99/suno-auto-selector
-// @version      2.4.0
+// @version      2.5.0
 // @description  Sunoの作曲フォームにプリセットを保存・自動入力するツール
 // @author       ハリたっく
 // @match        https://suno.com/*
@@ -339,54 +339,118 @@
   }
 
   // =========================================================
-  //  バージョン選択
+  //  バージョン選択（パネル除外）
   // =========================================================
-  function setVersion(ver) {
+  async function setVersion(ver) {
     if (!ver || ver === 'none') return { ok: true, method: 'skip' };
     const vn = norm(ver);
+    const panel = document.getElementById('suno-af-panel');
 
     function clickItem() {
-      const sel = '[role="option"], [role="menuitem"], [role="listitem"], li, [class*="option"], [class*="item"]';
+      const sel = '[role="option"], [role="menuitem"], [role="listitem"], li';
       for (const item of document.querySelectorAll(sel)) {
+        if (panel && panel.contains(item)) continue;
         const t = norm(item.textContent);
         if (t.startsWith(vn)) {
           item.click();
+          console.log('[SunoAutoFill] Version item クリック:', t);
           return true;
         }
       }
       return false;
     }
 
-    // 既に開いていれば即選択
     if (clickItem()) return { ok: true, method: 'direct' };
 
-    // ドロップダウントリガーを開く
+    // ドロップダウントリガーを開く（パネル外限定）
+    let triggerClicked = false;
     for (const btn of document.querySelectorAll('button, [role="combobox"], [role="button"]')) {
+      if (panel && panel.contains(btn)) continue;
       const t = norm(btn.textContent);
-      if (/^v\d/.test(t) || t.includes('model') || t.includes('version')) {
+      // Suno のバージョンボタン: 「v5」「v5 ▼」のような短いテキスト
+      if (/^v\d/.test(t) && t.length < 15) {
         btn.click();
-        setTimeout(() => { if (!clickItem()) setTimeout(clickItem, 300); }, 200);
-        return { ok: true, method: 'trigger' };
+        console.log('[SunoAutoFill] Version trigger クリック:', t);
+        triggerClicked = true;
+        await sleep(400);
+        if (clickItem()) return { ok: true, method: 'trigger' };
+        await sleep(400);
+        if (clickItem()) return { ok: true, method: 'trigger-late' };
+        break;
       }
     }
-    return { ok: false, method: 'no-trigger' };
+    return { ok: false, method: triggerClicked ? 'no-item' : 'no-trigger' };
   }
 
   // =========================================================
-  //  More Options が開いているか確認のみ（自動クリックしない）
+  //  More Options 展開判定 & 自動展開
   // =========================================================
   function isMoreOptionsExpanded() {
     // Suno の Exclude プレースホルダの input が存在 = 展開済み
     if (findByPlaceholder(['exclude'], 'input')) return true;
-    // または "Vocal Gender" "Lyrics Mode" "Weirdness" のラベルがパネル外に存在
+    // または "Weirdness" のラベルがパネル外に存在
     const panel = document.getElementById('suno-af-panel');
     for (const el of document.querySelectorAll('div, span, label, p')) {
       if (panel && panel.contains(el)) continue;
       const t = norm(el.textContent);
-      if (t.startsWith('weirdness') || t.startsWith('vocal gender') || t.startsWith('lyrics mode')) {
-        if (t.length < 30) return true;
+      if (t === 'weirdness' || t === 'vocal gender' || t === 'lyrics mode') return true;
+    }
+    return false;
+  }
+
+  async function expandMoreOptions() {
+    if (isMoreOptionsExpanded()) {
+      console.log('[SunoAutoFill] More Options すでに展開済み');
+      return true;
+    }
+
+    const panel = document.getElementById('suno-af-panel');
+
+    // "More Options" を含むクリック候補（パネル外限定）
+    const candidates = [];
+
+    // 1. button / role=button の中で "More Options" が完全一致 or 始まる短いもの
+    for (const el of document.querySelectorAll('button, [role="button"]')) {
+      if (panel && panel.contains(el)) continue;
+      const t = norm(el.textContent);
+      if ((t === 'more options' || t.startsWith('more options')) && t.length < 25) {
+        candidates.push(el);
       }
     }
+
+    // 2. 上で見つからなければ div/section/h3/h4 を見る
+    if (candidates.length === 0) {
+      for (const el of document.querySelectorAll('div, section, h3, h4, span')) {
+        if (panel && panel.contains(el)) continue;
+        const t = norm(el.textContent);
+        if ((t === 'more options' || t.startsWith('more options')) &&
+            t.length < 25 && el.children.length <= 5) {
+          candidates.push(el);
+        }
+      }
+    }
+
+    console.log('[SunoAutoFill] More Options 候補:', candidates.length, '個');
+
+    // 候補をクリック → 展開を確認 → 失敗したら親をクリック
+    for (const target of candidates) {
+      target.click();
+      await sleep(500);
+      if (isMoreOptionsExpanded()) {
+        console.log('[SunoAutoFill] 展開成功:', target.tagName);
+        return true;
+      }
+      // 親も試す
+      if (target.parentElement && !panel?.contains(target.parentElement)) {
+        target.parentElement.click();
+        await sleep(500);
+        if (isMoreOptionsExpanded()) {
+          console.log('[SunoAutoFill] 展開成功(親):', target.parentElement.tagName);
+          return true;
+        }
+      }
+    }
+    console.log('[SunoAutoFill] More Options 展開失敗');
     return false;
   }
 
@@ -399,11 +463,9 @@
 
     const results = [];
 
-    // More Options 展開チェック（自動クリックはしない）
-    const expanded = isMoreOptionsExpanded();
-    if (!expanded) {
-      results.push(['⚠️ More Options 未展開', false]);
-    }
+    // More Options を自動展開（閉じている場合のみ）
+    const expanded = await expandMoreOptions();
+    results.push(['MoreOptions展開', expanded]);
 
     // === Lyrics: placeholderマッチ → 1番目のtextareaフォールバック ===
     const sunoTextareas = getSunoTextareas();
@@ -458,7 +520,7 @@
 
     // バージョン
     if (p.version && p.version !== 'none') {
-      const r = setVersion(p.version);
+      const r = await setVersion(p.version);
       results.push([`Version(${r.method})`, r.ok]);
     }
 
