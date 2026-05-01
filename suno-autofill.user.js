@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Suno AutoFill（プリセット自動入力）
 // @namespace    https://github.com/sasakama99/suno-auto-selector
-// @version      3.7.0
+// @version      3.7.1
 // @description  Sunoの作曲フォームにプリセットを保存・自動入力するツール
 // @author       ハリたっく
 // @match        https://suno.com/*
@@ -512,31 +512,18 @@
   // =========================================================
   //  More Options 展開判定 & 自動展開
   // =========================================================
-  // 可視性チェック（祖先まで遡って aria-hidden や height:0 をチェック）
+  // 可視性チェック（自身のサイズ + 祖先の aria-hidden のみ。過剰検出を避ける）
   function isVisible(el) {
     if (!el) return false;
-
-    // 自身のチェック
     const rect = el.getBoundingClientRect();
     if (rect.width === 0 || rect.height === 0) return false;
     const style = getComputedStyle(el);
     if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') return false;
 
-    // 祖先を遡ってチェック
+    // 祖先のaria-hidden="true"だけチェック
     let p = el.parentElement;
-    while (p && p !== document.body && p !== document.documentElement) {
-      // aria-hidden="true" が祖先にあれば隠されている
+    while (p && p !== document.body) {
       if (p.getAttribute('aria-hidden') === 'true') return false;
-
-      const ps = getComputedStyle(p);
-      if (ps.display === 'none' || ps.visibility === 'hidden') return false;
-
-      // height: 0 で overflow: hidden の祖先 = 折り畳まれている
-      // または height/maxHeight が 0px と明示されている
-      const pRect = p.getBoundingClientRect();
-      if (pRect.height === 0 && (p.style.height === '0px' || ps.maxHeight === '0px')) return false;
-      if (pRect.height === 0 && pRect.width > 0) return false; // 横長で高さ0 = 折り畳み
-
       p = p.parentElement;
     }
     return true;
@@ -544,6 +531,17 @@
 
   function isMoreOptionsExpanded() {
     const panel = document.getElementById('suno-af-panel');
+
+    // 【最優先】More Options ボタンの aria-expanded 属性をチェック
+    for (const btn of document.querySelectorAll('button, [role="button"], [aria-expanded]')) {
+      if (panel && panel.contains(btn)) continue;
+      const t = norm(btn.textContent);
+      if (t === 'more options' || t.startsWith('more options')) {
+        const expanded = btn.getAttribute('aria-expanded');
+        if (expanded === 'true') return true;
+        if (expanded === 'false') return false;
+      }
+    }
 
     // 判定1: 可視のExcludeインプット
     for (const el of document.querySelectorAll('input, textarea')) {
@@ -559,19 +557,6 @@
       if (isVisible(el)) return true;
     }
 
-    // 判定3: 可視の葉ノードラベル
-    for (const el of document.querySelectorAll('div, span, label, p')) {
-      if (panel && panel.contains(el)) continue;
-      if (!isVisible(el)) continue;
-      let directText = '';
-      for (const node of el.childNodes) {
-        if (node.nodeType === Node.TEXT_NODE) directText += node.textContent;
-      }
-      const dt = norm(directText);
-      if (dt === 'weirdness' || dt === 'vocal gender' || dt === 'lyrics mode' || dt === 'style influence') {
-        return true;
-      }
-    }
     return false;
   }
 
@@ -1058,12 +1043,15 @@
 
     document.getElementById('af-apply').onclick = async () => {
       collectForm(currentPreset);
+      // プリセットがMore Options項目を含むなら、適用後15秒間 More Options をキープ
+      const p = settings.presets[currentPreset];
+      const hasMoreOptionsData = !!(p.excludeStyles || p.vocalGender !== 'none' ||
+        p.lyricsMode || p.weirdness !== undefined || p.styleInfluence !== undefined);
+
       await applyPreset(currentPreset);
 
-      // 適用後10秒間は More Options を「開いた状態でキープ」する
-      const wasOpen = isMoreOptionsExpanded();
-      if (wasOpen) {
-        keepMoreOptionsOpen(10000);
+      if (hasMoreOptionsData) {
+        keepMoreOptionsOpen(15000);
       }
     };
 
