@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Suno AutoFill（プリセット自動入力）
 // @namespace    https://github.com/sasakama99/suno-auto-selector
-// @version      3.6.0
+// @version      3.7.0
 // @description  Sunoの作曲フォームにプリセットを保存・自動入力するツール
 // @author       ハリたっく
 // @match        https://suno.com/*
@@ -512,13 +512,33 @@
   // =========================================================
   //  More Options 展開判定 & 自動展開
   // =========================================================
-  // 可視性チェック
+  // 可視性チェック（祖先まで遡って aria-hidden や height:0 をチェック）
   function isVisible(el) {
     if (!el) return false;
+
+    // 自身のチェック
     const rect = el.getBoundingClientRect();
     if (rect.width === 0 || rect.height === 0) return false;
     const style = getComputedStyle(el);
     if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') return false;
+
+    // 祖先を遡ってチェック
+    let p = el.parentElement;
+    while (p && p !== document.body && p !== document.documentElement) {
+      // aria-hidden="true" が祖先にあれば隠されている
+      if (p.getAttribute('aria-hidden') === 'true') return false;
+
+      const ps = getComputedStyle(p);
+      if (ps.display === 'none' || ps.visibility === 'hidden') return false;
+
+      // height: 0 で overflow: hidden の祖先 = 折り畳まれている
+      // または height/maxHeight が 0px と明示されている
+      const pRect = p.getBoundingClientRect();
+      if (pRect.height === 0 && (p.style.height === '0px' || ps.maxHeight === '0px')) return false;
+      if (pRect.height === 0 && pRect.width > 0) return false; // 横長で高さ0 = 折り畳み
+
+      p = p.parentElement;
+    }
     return true;
   }
 
