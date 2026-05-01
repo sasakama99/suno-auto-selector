@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Suno AutoFill（プリセット自動入力）
 // @namespace    https://github.com/sasakama99/suno-auto-selector
-// @version      3.9.0
+// @version      3.10.0
 // @description  Sunoの作曲フォームにプリセットを保存・自動入力するツール
 // @author       ハリたっく
 // @match        https://suno.com/*
@@ -94,6 +94,26 @@
               else h({ target: { value: String(value) }, currentTarget: { value: String(value) } });
               return true;
             } catch (e) { /* 次のハンドラを試す */ }
+          }
+        }
+      }
+      f = f.return;
+    }
+    return false;
+  }
+
+  // React ハンドラを呼ぶ（値をそのまま渡す版 — ToggleGroup 用）
+  function callReactHandlerRaw(el, value, eventNames = ['onValueChange', 'onChange']) {
+    const key = reactKey(el);
+    if (!key) return false;
+    let f = el[key];
+    while (f) {
+      const props = f.memoizedProps || f.pendingProps || f;
+      if (props) {
+        for (const ev of eventNames) {
+          const h = props[ev];
+          if (typeof h === 'function') {
+            try { h(value); return true; } catch (e) {}
           }
         }
       }
@@ -270,7 +290,17 @@
       return { ok: false, method: 'no-thumb' };
     }
 
-    // 方法①: トラッククリック（ポインターイベント）
+    // 方法①: React fiber 経由（onValueChange([percent]) を直接呼ぶ — 最確実）
+    const reactOk = callReactHandler(thumb, percent, ['onValueChange', 'onValueCommit']);
+    if (reactOk) {
+      await sleep(150);
+      const after = parseInt(thumb.getAttribute('aria-valuenow') || '-1');
+      console.log(`[SunoAutoFill] react: target=${percent}, aria-valuenow=${after}`);
+      if (after >= 0 && Math.abs(after - percent) <= 2) return { ok: true, method: 'react' };
+      // aria-valuenow が更新されなくてもハンドラが呼べた場合はポインター補完
+    }
+
+    // 方法②: トラッククリック（ポインターイベント）
     if (setRadixSliderByTrackPointer(thumb, percent)) {
       await sleep(80);
       const after = parseInt(thumb.getAttribute('aria-valuenow') || '-1');
@@ -278,7 +308,7 @@
       if (after >= 0 && Math.abs(after - percent) <= 2) return { ok: true, method: 'track-pointer' };
     }
 
-    // 方法②: キーボード（Home → ArrowRight×N）
+    // 方法③: キーボード（Home → ArrowRight×N）
     if (setRadixSliderByKeyboard(thumb, percent)) return { ok: true, method: 'keyboard' };
 
     return { ok: false, method: 'all-failed' };
@@ -686,14 +716,23 @@
 
     // ボタン系（realClick で確実に反応させる）
     if (p.vocalGender === 'none') {
-      // 現在アクティブな性別ボタンを OFF にする（トグル）
-      for (const txt of ['Male', 'Female']) {
-        const b = findButtonNearLabel('Vocal Gender', txt);
-        if (b && isButtonActive(b)) {
-          results.push([`${txt}→OFF`, realClick(b)]);
-          break;
+      // ToggleGroup の onValueChange('') で選択解除（React fiber 経由が最確実）
+      const anyBtn = findButtonNearLabel('Vocal Gender', 'Male') ||
+                     findButtonNearLabel('Vocal Gender', 'Female');
+      let cleared = false;
+      if (anyBtn) {
+        for (let el = anyBtn; el && el !== document.body; el = el.parentElement) {
+          if (callReactHandlerRaw(el, '', ['onValueChange'])) { cleared = true; break; }
         }
       }
+      if (!cleared) {
+        // フォールバック: アクティブなボタンをクリックしてトグルOFF
+        for (const txt of ['Male', 'Female']) {
+          const b = findButtonNearLabel('Vocal Gender', txt);
+          if (b && isButtonActive(b)) { cleared = !!realClick(b); break; }
+        }
+      }
+      results.push(['VocalGender→none', cleared]);
     } else if (p.vocalGender === 'male') {
       const b = findButtonNearLabel('Vocal Gender', 'Male');
       results.push(['Male',   b ? realClick(b) : false]);
