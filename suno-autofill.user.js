@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Suno AutoFill（プリセット自動入力）
 // @namespace    https://github.com/sasakama99/suno-auto-selector
-// @version      2.6.0
+// @version      2.7.0
 // @description  Sunoの作曲フォームにプリセットを保存・自動入力するツール
 // @author       ハリたっく
 // @match        https://suno.com/*
@@ -347,48 +347,73 @@
     const panel = document.getElementById('suno-af-panel');
 
     function clickItem() {
-      // 多様なセレクタで試す（Sunoのドロップダウン実装に幅広く対応）
-      const all = document.querySelectorAll('[role="option"], [role="menuitem"], [role="listitem"], li, [class*="option"], [class*="Option"], [class*="item"], [class*="Item"], div, button, span');
-      for (const item of all) {
+      // ドロップダウンコンテナの中だけを探す（誤クリック防止）
+      const containers = document.querySelectorAll(
+        '[role="menu"], [role="listbox"], [role="dialog"], [data-state="open"], ' +
+        '[class*="dropdown"], [class*="Dropdown"], [class*="popover"], [class*="Popover"], ' +
+        '[class*="menu"]'
+      );
+      for (const cont of containers) {
+        if (panel && panel.contains(cont)) continue;
+        for (const item of cont.querySelectorAll('[role="option"], [role="menuitem"], [role="listitem"], li, button, div')) {
+          if (panel && panel.contains(item)) continue;
+          const t = norm(item.textContent);
+          if (t.length > 200) continue;
+          // 完全一致 or "v5 " で始まる（"v5.5"の誤認防止）
+          if (t === vn || t.startsWith(vn + ' ')) {
+            const rect = item.getBoundingClientRect();
+            if (rect.width === 0 || rect.height === 0) continue;
+            // 直接的なリーフ要素を優先
+            if (item.children.length > 8) continue;
+            item.click();
+            console.log('[SunoAutoFill] Version item クリック:', t.slice(0, 60));
+            return true;
+          }
+        }
+      }
+      // フォールバック: role 属性のみで探す（ドロップダウンが特殊な実装の場合）
+      for (const item of document.querySelectorAll('[role="option"], [role="menuitem"], [role="listitem"]')) {
         if (panel && panel.contains(item)) continue;
         const t = norm(item.textContent);
-        // 完全一致か "v5 " で始まる（"v5.5"を誤認しないように）
-        const exactStart = t === vn || t.startsWith(vn + ' ');
-        if (!exactStart) continue;
-        // 短すぎず長すぎない（メニュー項目）
-        if (t.length > 100) continue;
-        // 表示されているか
-        const rect = item.getBoundingClientRect();
-        if (rect.width === 0 || rect.height === 0) continue;
-        // 子要素が多すぎる場合スキップ（外側の親っぽい）
-        if (item.children.length > 6) continue;
-        item.click();
-        console.log('[SunoAutoFill] Version item クリック:', t.slice(0, 50), 'tag:', item.tagName);
-        return true;
+        if (t === vn || t.startsWith(vn + ' ')) {
+          item.click();
+          console.log('[SunoAutoFill] Version item クリック(role):', t.slice(0, 60));
+          return true;
+        }
       }
       return false;
     }
 
-    if (clickItem()) return { ok: true, method: 'direct' };
-
     // ドロップダウントリガーを開く（パネル外限定）
     let triggerClicked = false;
-    for (const btn of document.querySelectorAll('button, [role="combobox"], [role="button"]')) {
+    let triggerBtn = null;
+
+    for (const btn of document.querySelectorAll('button, [role="combobox"]')) {
       if (panel && panel.contains(btn)) continue;
       const t = norm(btn.textContent);
       // Suno のバージョンボタン: 「v5」「v5 ▼」のような短いテキスト
-      if (/^v\d/.test(t) && t.length < 15) {
-        btn.click();
-        console.log('[SunoAutoFill] Version trigger クリック:', t);
-        triggerClicked = true;
-        await sleep(400);
-        if (clickItem()) return { ok: true, method: 'trigger' };
-        await sleep(400);
-        if (clickItem()) return { ok: true, method: 'trigger-late' };
+      if (/^v[\d.]+/.test(t) && t.length < 15) {
+        triggerBtn = btn;
         break;
       }
     }
-    return { ok: false, method: triggerClicked ? 'no-item' : 'no-trigger' };
+
+    if (!triggerBtn) {
+      console.log('[SunoAutoFill] Version trigger 未検出');
+      return { ok: false, method: 'no-trigger' };
+    }
+
+    triggerBtn.click();
+    console.log('[SunoAutoFill] Version trigger クリック:', norm(triggerBtn.textContent));
+    triggerClicked = true;
+    await sleep(500);
+
+    if (clickItem()) return { ok: true, method: 'trigger' };
+    await sleep(500);
+    if (clickItem()) return { ok: true, method: 'trigger-late' };
+
+    console.log('[SunoAutoFill] Version item を見つけられず');
+    return { ok: false, method: 'no-item' };
   }
 
   // =========================================================
