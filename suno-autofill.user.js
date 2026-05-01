@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Suno AutoFill（プリセット自動入力）
 // @namespace    https://github.com/sasakama99/suno-auto-selector
-// @version      3.13.0
+// @version      3.14.0
 // @description  Sunoの作曲フォームにプリセットを保存・自動入力するツール
 // @author       ハリたっく
 // @match        https://suno.com/*
@@ -285,75 +285,105 @@
 
   // =========================================================
   //  スライダー設定（Radix UI対応）
-  //  Sunoは role="slider" を使用 → トラック検出 + pointer or キーボード
+  //  優先順: React fiber(root→上へ) → キーボード → トラックPointer
   // =========================================================
   async function setSlider(labelText, percent) {
     const ln = norm(labelText);
     const panel = document.getElementById('suno-af-panel');
 
-    // Radix Slider のサムを探す
-    // data-radix-slider-thumb 属性を優先 → なければ role="slider" で検索
-    // ※オーディオプレイヤーのシークバー（幅広・別ラベル）を除外するため
-    //   親要素テキストは5段まで・200文字以内でマッチ
-    const thumbCandidates = [
+    // Radix Slider のサムを探す（重複除去・オーディオ除外）
+    const allThumbs = [...new Set([
       ...document.querySelectorAll('[data-radix-slider-thumb]'),
       ...document.querySelectorAll('[role="slider"]')
-    ].filter((el, i, arr) => {
+    ])].filter(el => {
       if (panel && panel.contains(el)) return false;
-      if (arr.indexOf(el) !== i) return false; // 重複除去
-      // オーディオプレイヤー系を除外（aria-label に seek/time/audio/progress 含む）
       const label = norm(el.getAttribute('aria-label') || '');
       if (/seek|time|audio|progress|volume/.test(label)) return false;
       return true;
     });
 
+    console.log(`[SunoAutoFill] setSlider "${labelText}": ${allThumbs.length}個のサム検出`);
+    allThumbs.forEach((el, i) => {
+      const rootEl = el.closest('[data-radix-slider-root]') || el.parentElement;
+      console.log(`  [${i}] valuenow=${el.getAttribute('aria-valuenow')} label="${el.getAttribute('aria-label')}" parentText="${(rootEl?.textContent||'').trim().slice(0,50)}"`);
+    });
+
+    // ラベルマッチでサムを特定
     let thumb = null;
-    for (const el of thumbCandidates) {
-      let p = el.parentElement;
-      for (let i = 0; i < 5; i++) {
-        if (!p) break;
-        const txt = norm(p.textContent);
-        // テキストが短い（=ラベル近傍）かつ対象キーワードを含む場合のみマッチ
-        if (txt.length < 300 && txt.includes(ln)) { thumb = el; break; }
-        p = p.parentElement;
+    for (const el of allThumbs) {
+      for (let p = el.parentElement, i = 0; p && i < 8; p = p.parentElement, i++) {
+        if ((p.textContent||'').length < 300 && norm(p.textContent||'').includes(ln)) {
+          thumb = el; break;
+        }
       }
       if (thumb) break;
     }
-
-    // ラベルマッチ失敗 → 順番ベース
-    // Weirdness=先頭, Style Influence=2番目（オーディオプレイヤー除外済みリストから）
+    // 位置ベースフォールバック
     if (!thumb) {
-      if (ln === 'weirdness' && thumbCandidates[0]) thumb = thumbCandidates[0];
-      else if ((ln === 'styleinfluence' || ln.includes('influence')) && thumbCandidates[1]) thumb = thumbCandidates[1];
+      if (ln.includes('weird') && allThumbs[0]) thumb = allThumbs[0];
+      else if ((ln.includes('style') || ln.includes('influence')) && allThumbs[1]) thumb = allThumbs[1];
     }
 
     if (!thumb) {
-      console.log(`[SunoAutoFill] setSlider: thumb not found for "${labelText}"`);
+      console.log(`[SunoAutoFill] setSlider: サム未検出 "${labelText}"`);
       return { ok: false, method: 'no-thumb' };
     }
-    console.log(`[SunoAutoFill] setSlider: "${labelText}" → thumb aria-valuenow=${thumb.getAttribute('aria-valuenow')}, label="${thumb.getAttribute('aria-label')}"`);
+    console.log(`[SunoAutoFill] setSlider: target=${percent}, currentValueNow=${thumb.getAttribute('aria-valuenow')}`);
 
+    // スライダールート要素を特定（Reactハンドラの起点）
+    let sliderRoot = thumb.closest('[data-radix-slider-root]');
+    if (!sliderRoot) {
+      for (let el = thumb.parentElement; el && el !== document.body; el = el.parentElement) {
+        if (el.querySelector('[data-radix-slider-track]') && el.querySelector('[data-radix-slider-thumb]')) {
+          sliderRoot = el; break;
+        }
+      }
+    }
+    const reactBase = sliderRoot || thumb;
 
-    // 方法①: キーボード相対移動（サムをクリックしてフォーカス→ArrowKey）
-    if (await setRadixSliderRelative(thumb, percent)) return { ok: true, method: 'keyboard-rel' };
+    // 方法①: React fiber の onValueChange を root から上方向へ探して直呼び
+    // Radix Slider は onValueChange(number[]) を期待する
+    const tryReactFiber = async () => {
+      for (let el = reactBase; el && el !== document.body; el = el.parentElement) {
+        const key = reactKey(el);
+        if (!key) continue;
+        let f = el[key];
+        while (f) {
+          const props = f.memoizedProps || f.pendingProps;
+          if (props) {
+            for (const evName of ['onValueChange', 'onValueCommit']) {
+              const h = props[evName];
+              if (typeof h === 'function') {
+                try {
+                  h([percent]);
+                  await sleep(150);
+                  const after = parseInt(thumb.getAttribute('aria-valuenow') ?? '-1');
+                  console.log(`[SunoAutoFill] react-fiber(${evName}): target=${percent}, after=${after}`);
+                  if (after >= 0 && Math.abs(after - percent) <= 3) return true;
+                } catch(e) {}
+              }
+            }
+          }
+          f = f.return;
+        }
+      }
+      return false;
+    };
+    if (await tryReactFiber()) return { ok: true, method: 'react-fiber' };
 
-    // 方法②: トラッククリック（ポインターイベント）
+    // 方法②: キーボード（Home→ArrowRight×N）
+    if (await setRadixSliderRelative(thumb, percent)) return { ok: true, method: 'keyboard' };
+
+    // 方法③: トラックへのPointerイベント
     if (setRadixSliderByTrackPointer(thumb, percent)) {
-      await sleep(80);
-      const after = parseInt(thumb.getAttribute('aria-valuenow') || '-1');
-      console.log(`[SunoAutoFill] track-pointer: target=${percent}, aria-valuenow=${after}`);
-      if (after >= 0 && Math.abs(after - percent) <= 2) return { ok: true, method: 'track-pointer' };
+      await sleep(100);
+      const after = parseInt(thumb.getAttribute('aria-valuenow') ?? '-1');
+      console.log(`[SunoAutoFill] track-pointer: target=${percent}, after=${after}`);
+      if (after >= 0 && Math.abs(after - percent) <= 3) return { ok: true, method: 'track-pointer' };
     }
 
-    // 方法③: React fiber 経由（onValueChange([percent]) を直接呼ぶ）
-    const reactOk = callReactHandler(thumb, percent, ['onValueChange', 'onValueCommit']);
-    if (reactOk) {
-      await sleep(150);
-      const after = parseInt(thumb.getAttribute('aria-valuenow') || '-1');
-      console.log(`[SunoAutoFill] react: target=${percent}, aria-valuenow=${after}`);
-      if (after >= 0 && Math.abs(after - percent) <= 2) return { ok: true, method: 'react' };
-    }
-
+    const finalVal = parseInt(thumb.getAttribute('aria-valuenow') ?? '-1');
+    console.log(`[SunoAutoFill] 全方法失敗: target=${percent}, final=${finalVal}`);
     return { ok: false, method: 'all-failed' };
   }
 
@@ -414,8 +444,10 @@
     try {
       // tabindex がなければ追加してフォーカス可能にする
       if (!thumb.hasAttribute('tabindex')) thumb.setAttribute('tabindex', '0');
+      // click() → focus() の順でブラウザフォーカスを確実に当てる
+      thumb.click();
       thumb.focus();
-      await sleep(50);
+      await sleep(80);
 
       const kd = (key, keyCode) => new KeyboardEvent('keydown', { key, keyCode, which: keyCode, bubbles: true, cancelable: true });
       const ku = (key, keyCode) => new KeyboardEvent('keyup',   { key, keyCode, which: keyCode, bubbles: true, cancelable: true });
@@ -1065,14 +1097,15 @@
     // CSS注入
     const css = document.createElement('style');
     css.textContent = `
-      #suno-af-panel { position:fixed;top:60px;right:20px;z-index:9999998;width:310px;
+      #suno-af-panel { position:fixed;top:10px;left:50%;transform:translateX(-50%);z-index:9999998;width:310px;
         background:rgba(13,13,13,.98);border:1px solid #2a2a2a;border-radius:14px;
         box-shadow:0 8px 32px rgba(0,0,0,.8);
         font-family:-apple-system,"Hiragino Sans",sans-serif;color:#e0e0e0;font-size:13px;}
       #suno-af-panel * { box-sizing:border-box; }
       #suno-af-panel .af-hd { display:flex;align-items:center;justify-content:space-between;
         padding:11px 14px 9px;background:#111;border-bottom:1px solid #222;
-        border-radius:14px 14px 0 0; }
+        border-radius:14px 14px 0 0;cursor:grab; }
+      #suno-af-panel .af-hd.dragging { cursor:grabbing; }
       #suno-af-panel .af-title { font-weight:700;font-size:14px;color:#f0a020;flex:1; }
       #suno-af-panel .af-iconbtn { background:none;border:1px solid #333;color:#777;
         border-radius:6px;width:26px;height:26px;cursor:pointer;font-size:11px;margin-left:4px; }
@@ -1305,6 +1338,32 @@
         syncDefaultUI();
       }
     };
+
+    // ドラッグ移動
+    const hd = panel.querySelector('.af-hd');
+    let _drag = false, _dx = 0, _dy = 0;
+    hd.addEventListener('mousedown', e => {
+      if (e.target.closest('button')) return;
+      _drag = true;
+      const r = panel.getBoundingClientRect();
+      _dx = e.clientX - r.left;
+      _dy = e.clientY - r.top;
+      hd.classList.add('dragging');
+      panel.style.transform = '';
+      panel.style.left = r.left + 'px';
+      panel.style.top  = r.top  + 'px';
+      e.preventDefault();
+    });
+    document.addEventListener('mousemove', e => {
+      if (!_drag) return;
+      panel.style.left = (e.clientX - _dx) + 'px';
+      panel.style.top  = (e.clientY - _dy) + 'px';
+    });
+    document.addEventListener('mouseup', () => {
+      if (!_drag) return;
+      _drag = false;
+      hd.classList.remove('dragging');
+    });
 
     rebuildSelect();
     loadForm(currentPreset);
