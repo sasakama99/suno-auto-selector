@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Suno AutoFill（プリセット自動入力）
 // @namespace    https://github.com/sasakama99/suno-auto-selector
-// @version      3.8.0
+// @version      3.8.1
 // @description  Sunoの作曲フォームにプリセットを保存・自動入力するツール
 // @author       ハリたっく
 // @match        https://suno.com/*
@@ -715,33 +715,9 @@
       results.push([`Version(${r.method})`, r.ok]);
     }
 
-    // 適用後の状態
-    let finalState = isMoreOptionsExpanded();
+    // 適用後の状態（再展開はしない、ボタンクリックでkeepOpenがやる）
+    const finalState = isMoreOptionsExpanded();
     console.log(`[SunoAutoFill] applyPreset 終了時 MoreOpt=${finalState ? 'OPEN' : 'CLOSED'}`);
-
-    // 閉じていたら最大3回まで再展開を試みる
-    if (!finalState) {
-      for (let attempt = 1; attempt <= 3; attempt++) {
-        console.log(`[SunoAutoFill] More Options 再展開試行 ${attempt}/3`);
-        await sleep(400);
-        const reopened = await expandMoreOptions();
-        if (reopened) {
-          // 再展開後、安定するまで監視（500ms間隔で2回チェック）
-          await sleep(500);
-          if (isMoreOptionsExpanded()) {
-            await sleep(500);
-            if (isMoreOptionsExpanded()) {
-              console.log(`[SunoAutoFill] More Options 再展開成功＋安定 (試行${attempt})`);
-              results.push(['MoreOptions再展開', true]);
-              finalState = true;
-              break;
-            }
-          }
-          console.log('[SunoAutoFill] 再展開後すぐに閉じた → リトライ');
-        }
-      }
-      if (!finalState) results.push(['MoreOptions再展開', false]);
-    }
 
     // クリック監視を解除して全クリックを表示
     document.removeEventListener('click', clickListener, true);
@@ -762,24 +738,27 @@
     console.log('[SunoAutoFill] 適用結果:', results);
   }
 
-  // More Options を一定時間開いた状態でキープ（閉じたら即座に再展開）
+  // More Options が閉じてしまったら最大1回だけ慎重に再展開
   let keepOpenTimer = null;
-  function keepMoreOptionsOpen(durationMs) {
+  function keepMoreOptionsOpen() {
+    // 連打防止：3秒待ってから1回だけチェック・再展開
     if (keepOpenTimer) clearTimeout(keepOpenTimer);
-    const startTime = Date.now();
-
-    async function watchAndReopen() {
-      if (Date.now() - startTime > durationMs) {
-        console.log('[SunoAutoFill] keepMoreOptionsOpen 終了');
-        return;
+    keepOpenTimer = setTimeout(async () => {
+      const moBtn = findMoreOptionsButton();
+      const titleInp = findSongTitleInput();
+      if (moBtn && titleInp) {
+        const moBottom = moBtn.getBoundingClientRect().bottom;
+        const titleTop = titleInp.getBoundingClientRect().top;
+        const gap = titleTop - moBottom;
+        console.log(`[SunoAutoFill] keepOpen診断: gap=${gap.toFixed(0)}px, expanded=${isMoreOptionsExpanded()}`);
       }
       if (!isMoreOptionsExpanded()) {
-        console.log('[SunoAutoFill] keepOpen: 閉じたので再展開');
+        console.log('[SunoAutoFill] keepOpen: 1回だけ再展開試行');
         await expandMoreOptions();
+      } else {
+        console.log('[SunoAutoFill] keepOpen: 既に開いてるので何もしない');
       }
-      keepOpenTimer = setTimeout(watchAndReopen, 500);
-    }
-    watchAndReopen();
+    }, 3000);
   }
 
   function showToast(msg, dur = 2500) {
@@ -1074,15 +1053,15 @@
 
     document.getElementById('af-apply').onclick = async () => {
       collectForm(currentPreset);
-      // プリセットがMore Options項目を含むなら、適用後15秒間 More Options をキープ
       const p = settings.presets[currentPreset];
       const hasMoreOptionsData = !!(p.excludeStyles || p.vocalGender !== 'none' ||
         p.lyricsMode || p.weirdness !== undefined || p.styleInfluence !== undefined);
 
       await applyPreset(currentPreset);
 
+      // 3秒後に1回だけチェックして閉じてたら開く（連打しない）
       if (hasMoreOptionsData) {
-        keepMoreOptionsOpen(15000);
+        keepMoreOptionsOpen();
       }
     };
 
