@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Suno AutoFill（プリセット自動入力）
 // @namespace    https://github.com/sasakama99/suno-auto-selector
-// @version      3.11.0
+// @version      3.12.0
 // @description  Sunoの作曲フォームにプリセットを保存・自動入力するツール
 // @author       ハリたっく
 // @match        https://suno.com/*
@@ -318,25 +318,10 @@
       return { ok: false, method: 'no-thumb' };
     }
 
-    // 方法①: サムをドラッグしてトラック目標位置まで移動（手動操作と同じシーケンス）
-    const dragOk = await dragSliderThumb(thumb, percent);
-    if (dragOk) {
-      await sleep(120);
-      const after = parseInt(thumb.getAttribute('aria-valuenow') || '-1');
-      console.log(`[SunoAutoFill] drag: target=${percent}, aria-valuenow=${after}`);
-      if (after >= 0 && Math.abs(after - percent) <= 2) return { ok: true, method: 'drag' };
-    }
+    // 方法①: キーボード相対移動（サムをクリックしてフォーカス→ArrowKey）
+    if (await setRadixSliderRelative(thumb, percent)) return { ok: true, method: 'keyboard-rel' };
 
-    // 方法②: React fiber 経由（onValueChange([percent]) を直接呼ぶ）
-    const reactOk = callReactHandler(thumb, percent, ['onValueChange', 'onValueCommit']);
-    if (reactOk) {
-      await sleep(150);
-      const after = parseInt(thumb.getAttribute('aria-valuenow') || '-1');
-      console.log(`[SunoAutoFill] react: target=${percent}, aria-valuenow=${after}`);
-      if (after >= 0 && Math.abs(after - percent) <= 2) return { ok: true, method: 'react' };
-    }
-
-    // 方法③: トラッククリック（ポインターイベント）
+    // 方法②: トラッククリック（ポインターイベント）
     if (setRadixSliderByTrackPointer(thumb, percent)) {
       await sleep(80);
       const after = parseInt(thumb.getAttribute('aria-valuenow') || '-1');
@@ -344,8 +329,14 @@
       if (after >= 0 && Math.abs(after - percent) <= 2) return { ok: true, method: 'track-pointer' };
     }
 
-    // 方法④: キーボード（現在値から相対移動）
-    if (await setRadixSliderRelative(thumb, percent)) return { ok: true, method: 'keyboard-rel' };
+    // 方法③: React fiber 経由（onValueChange([percent]) を直接呼ぶ）
+    const reactOk = callReactHandler(thumb, percent, ['onValueChange', 'onValueCommit']);
+    if (reactOk) {
+      await sleep(150);
+      const after = parseInt(thumb.getAttribute('aria-valuenow') || '-1');
+      console.log(`[SunoAutoFill] react: target=${percent}, aria-valuenow=${after}`);
+      if (after >= 0 && Math.abs(after - percent) <= 2) return { ok: true, method: 'react' };
+    }
 
     return { ok: false, method: 'all-failed' };
   }
@@ -402,18 +393,11 @@
     }
   }
 
-  // キーボード相対移動（Home+絶対移動ではなく現在値からの差分で動かす）
+  // キーボード相対移動（現在値からの差分でArrowKeyを送る）
   async function setRadixSliderRelative(thumb, percent) {
     try {
-      // サムをクリックしてフォーカス・Reactでアクティブ化
-      const r = thumb.getBoundingClientRect();
-      const cx = r.left + r.width / 2, cy = r.top + r.height / 2;
-      const opts = { bubbles: true, cancelable: true, clientX: cx, clientY: cy,
-                     pointerId: 1, pointerType: 'mouse', isPrimary: true, button: 0, buttons: 1 };
-      thumb.dispatchEvent(new PointerEvent('pointerdown', opts));
-      thumb.dispatchEvent(new PointerEvent('pointerup',   { ...opts, buttons: 0 }));
-      await sleep(50);
       thumb.focus();
+      await sleep(30);
 
       const current = parseInt(thumb.getAttribute('aria-valuenow') || '50');
       const delta = percent - current;
@@ -423,8 +407,9 @@
         thumb.dispatchEvent(new KeyboardEvent('keydown', { key, bubbles: true, cancelable: true }));
         thumb.dispatchEvent(new KeyboardEvent('keyup',   { key, bubbles: true, cancelable: true }));
       }
-      await sleep(50);
+      await sleep(80);
       const after = parseInt(thumb.getAttribute('aria-valuenow') || '-1');
+      console.log(`[SunoAutoFill] keyboard-rel: target=${percent}, after=${after}`);
       return after >= 0 && Math.abs(after - percent) <= 2;
     } catch (e) { return false; }
   }
@@ -846,20 +831,49 @@
 
     // ボタン系（realClick で確実に反応させる）
     if (p.vocalGender === 'none') {
-      // ToggleGroup の onValueChange('') で選択解除（React fiber 経由が最確実）
-      const anyBtn = findButtonNearLabel('Vocal Gender', 'Male') ||
-                     findButtonNearLabel('Vocal Gender', 'Female');
+      const maleBtn   = findButtonNearLabel('Vocal Gender', 'Male');
+      const femaleBtn = findButtonNearLabel('Vocal Gender', 'Female');
       let cleared = false;
-      if (anyBtn) {
-        for (let el = anyBtn; el && el !== document.body; el = el.parentElement) {
-          if (callReactHandlerRaw(el, '', ['onValueChange'])) { cleared = true; break; }
+
+      // 方法①: 背景色比較（Sunoはアクティブボタンを明るい背景で表示）
+      if (maleBtn && femaleBtn) {
+        const bgOf = el => {
+          // 要素本体と親3段まで確認して実際に色がついている要素の輝度を返す
+          for (let e = el; e && e !== document.body; e = e.parentElement) {
+            const bg = window.getComputedStyle(e).backgroundColor;
+            const m = bg.match(/rgba?\((\d+),\s*(\d+),\s*(\d+)/);
+            if (m) {
+              const brightness = parseInt(m[1]) + parseInt(m[2]) + parseInt(m[3]);
+              if (brightness > 30) return brightness; // 完全な黒/透明でなければ採用
+            }
+          }
+          return 0;
+        };
+        const maleBright   = bgOf(maleBtn);
+        const femaleBright = bgOf(femaleBtn);
+        console.log(`[SunoAutoFill] VocalGender brightness: male=${maleBright}, female=${femaleBright}`);
+        if (maleBright > femaleBright + 20) {
+          realClick(maleBtn); cleared = true;
+        } else if (femaleBright > maleBright + 20) {
+          realClick(femaleBtn); cleared = true;
         }
       }
+
+      // 方法②: DOM属性チェック（フォールバック）
       if (!cleared) {
-        // フォールバック: アクティブなボタンをクリックしてトグルOFF
-        for (const txt of ['Male', 'Female']) {
-          const b = findButtonNearLabel('Vocal Gender', txt);
-          if (b && isButtonActive(b)) { cleared = !!realClick(b); break; }
+        for (const b of [maleBtn, femaleBtn]) {
+          if (b && isButtonActive(b)) { realClick(b); cleared = true; break; }
+        }
+      }
+
+      // 方法③: React fiber で ToggleGroup をリセット
+      if (!cleared) {
+        for (const b of [maleBtn, femaleBtn]) {
+          if (!b) continue;
+          for (let el = b; el && el !== document.body; el = el.parentElement) {
+            if (callReactHandlerRaw(el, '', ['onValueChange'])) { cleared = true; break; }
+          }
+          if (cleared) break;
         }
       }
       results.push(['VocalGender→none', cleared]);
