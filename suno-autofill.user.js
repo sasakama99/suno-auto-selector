@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Suno AutoFill（プリセット自動入力）
 // @namespace    https://github.com/sasakama99/suno-auto-selector
-// @version      3.4.0
+// @version      3.5.0
 // @description  Sunoの作曲フォームにプリセットを保存・自動入力するツール
 // @author       ハリたっく
 // @match        https://suno.com/*
@@ -403,87 +403,76 @@
     const panel = document.getElementById('suno-af-panel');
 
     function diagnoseDropdown() {
-      // ドロップダウン展開後、可視要素で「v」始まりのテキストを持つものを全部ログ
       const matches = [];
       for (const el of document.body.querySelectorAll('*')) {
         if (panel && panel.contains(el)) continue;
         if (el.children.length > 8) continue;
         const t = (el.textContent || '').trim();
         if (!/^v\d/i.test(t)) continue;
-        if (t.length > 100) continue;
-        const rect = el.getBoundingClientRect();
-        if (rect.width === 0) continue;
+        if (t.length > 150) continue;
+        if (!isVisible(el)) continue;
         matches.push({
           tag: el.tagName,
           role: el.getAttribute('role'),
           dataValue: el.getAttribute('data-value'),
           dataRadix: el.hasAttribute('data-radix-collection-item'),
           dataState: el.getAttribute('data-state'),
+          ariaHasPopup: el.getAttribute('aria-haspopup'),
+          ariaSelected: el.getAttribute('aria-selected'),
           text: t.slice(0, 60),
-          cls: (el.className || '').toString().slice(0, 50)
+          cls: (el.className || '').toString().slice(0, 60)
         });
       }
-      console.log('[SunoAutoFill] ドロップダウン候補:', matches);
+      console.log(`[SunoAutoFill] ドロップダウン候補数:${matches.length}`);
+      // 最初の10個を1行ずつ詳細出力
+      matches.slice(0, 10).forEach((m, i) => {
+        console.log(`  [${i}] <${m.tag}> role="${m.role}" dataValue="${m.dataValue}" dataRadix=${m.dataRadix} text="${m.text}" cls="${m.cls}"`);
+      });
       return matches;
     }
 
     function clickItem(skipEl) {
-      // skipEl（トリガーボタン）のみ完全一致で除外（子孫を含めない）
-      function isTrigger(el) {
-        return el === skipEl;
+      // 候補を全部集めてから「面積が最小（=リーフ要素）」を選ぶ方式
+      const candidates = [];
+
+      for (const el of document.body.querySelectorAll('*')) {
+        if (panel && panel.contains(el)) continue;
+        if (el === skipEl) continue;
+        if (el.tagName === 'HTML' || el.tagName === 'BODY') continue;
+        if (el.children.length > 8) continue;
+        if (el.hasAttribute('aria-haspopup')) continue; // トリガー除外
+        if (!versionMatch(el.textContent, ver)) continue;
+        if (!isVisible(el)) continue;
+        const style = getComputedStyle(el);
+        if (style.pointerEvents === 'none') continue;
+
+        const rect = el.getBoundingClientRect();
+        candidates.push({
+          el,
+          area: rect.width * rect.height,
+          hasDataValue: el.hasAttribute('data-value'),
+          hasRole: !!el.getAttribute('role'),
+          isRadixItem: el.hasAttribute('data-radix-collection-item') || el.hasAttribute('cmdk-item')
+        });
       }
 
-      // 1) data-value 完全一致を最優先
-      for (const item of document.body.querySelectorAll('[data-value]')) {
-        if (panel && panel.contains(item)) continue;
-        if (isTrigger(item)) continue;
-        const dv = norm(item.getAttribute('data-value') || '');
-        if (dv === norm(ver) || dv.startsWith(norm(ver) + ' ')) {
-          const rect = item.getBoundingClientRect();
-          if (rect.width === 0) continue;
-          realClick(item);
-          console.log('[SunoAutoFill] Version data-value クリック:', dv);
-          return true;
-        }
+      if (candidates.length === 0) {
+        diagnoseDropdown();
+        return false;
       }
 
-      // 2) role/data-radix-collection-item で textContent マッチ
-      const selector = '[data-radix-collection-item], [cmdk-item], [role="option"], [role="menuitem"], [role="listitem"]';
-      for (const item of document.body.querySelectorAll(selector)) {
-        if (panel && panel.contains(item)) continue;
-        if (isTrigger(item)) continue;
-        if (!versionMatch(item.textContent, ver)) continue;
-        const rect = item.getBoundingClientRect();
-        if (rect.width === 0) continue;
-        realClick(item);
-        console.log('[SunoAutoFill] Version item クリック(role):', norm(item.textContent).slice(0, 60));
-        return true;
-      }
+      // 優先度: data-value > radix-item > role > 最小面積
+      candidates.sort((a, b) => {
+        if (a.hasDataValue !== b.hasDataValue) return a.hasDataValue ? -1 : 1;
+        if (a.isRadixItem !== b.isRadixItem) return a.isRadixItem ? -1 : 1;
+        if (a.hasRole !== b.hasRole) return a.hasRole ? -1 : 1;
+        return a.area - b.area; // 面積が小さい順
+      });
 
-      // 3) フォールバック: ドロップダウンコンテナ内の可視リーフ要素のみ
-      const containers = document.body.querySelectorAll(
-        '[role="menu"], [role="listbox"], [role="dialog"], [data-state="open"], ' +
-        '[class*="dropdown"], [class*="Dropdown"], [class*="popover"], [class*="Popover"]'
-      );
-      for (const cont of containers) {
-        if (panel && panel.contains(cont)) continue;
-        for (const el of cont.querySelectorAll('div, button, span, li, a')) {
-          if (panel && panel.contains(el)) continue;
-          if (isTrigger(el)) continue;
-          if (el.children.length > 8) continue;
-          if (!versionMatch(el.textContent, ver)) continue;
-          const rect = el.getBoundingClientRect();
-          if (rect.width === 0) continue;
-          const style = getComputedStyle(el);
-          if (style.display === 'none' || style.visibility === 'hidden' || style.pointerEvents === 'none') continue;
-          realClick(el);
-          console.log('[SunoAutoFill] Version item クリック(fallback):', norm(el.textContent).slice(0, 60));
-          return true;
-        }
-      }
-
-      diagnoseDropdown();
-      return false;
+      const best = candidates[0];
+      realClick(best.el);
+      console.log(`[SunoAutoFill] Version item クリック: <${best.el.tagName}> "${norm(best.el.textContent).slice(0, 60)}" (候補${candidates.length}個中)`);
+      return true;
     }
 
     // ドロップダウントリガーを開く（パネル外限定）
@@ -523,26 +512,37 @@
   // =========================================================
   //  More Options 展開判定 & 自動展開
   // =========================================================
+  // 可視性チェック
+  function isVisible(el) {
+    if (!el) return false;
+    const rect = el.getBoundingClientRect();
+    if (rect.width === 0 || rect.height === 0) return false;
+    const style = getComputedStyle(el);
+    if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') return false;
+    return true;
+  }
+
   function isMoreOptionsExpanded() {
     const panel = document.getElementById('suno-af-panel');
 
-    // 判定1: Excludeのinput/textareaが存在
+    // 判定1: 可視のExcludeインプット
     for (const el of document.querySelectorAll('input, textarea')) {
       if (panel && panel.contains(el)) continue;
+      if (!isVisible(el)) continue;
       const ph = norm(el.placeholder || el.getAttribute('aria-label') || '');
       if (ph.includes('exclude')) return true;
     }
 
-    // 判定2: Sunoの[role="slider"]がパネル外に存在 = Weirdness/Style Influenceがある
+    // 判定2: 可視のSunoスライダー
     for (const el of document.querySelectorAll('[role="slider"]')) {
       if (panel && panel.contains(el)) continue;
-      return true;
+      if (isVisible(el)) return true;
     }
 
-    // 判定3: 葉ノードのラベル（直接のテキストノード）で完全一致
+    // 判定3: 可視の葉ノードラベル
     for (const el of document.querySelectorAll('div, span, label, p')) {
       if (panel && panel.contains(el)) continue;
-      // 子要素がある場合は直接のテキストノードのみ取得
+      if (!isVisible(el)) continue;
       let directText = '';
       for (const node of el.childNodes) {
         if (node.nodeType === Node.TEXT_NODE) directText += node.textContent;
@@ -611,9 +611,12 @@
 
     const results = [];
 
-    // 全クリックを監視（More Optionsが閉じる原因調査）
+    // 全クリックを監視（パネル内は除外）
     const clickLog = [];
+    const panelEl = document.getElementById('suno-af-panel');
     const clickListener = (e) => {
+      // パネル内のクリックは無視
+      if (panelEl && panelEl.contains(e.target)) return;
       const t = (e.target?.textContent || '').trim().slice(0, 40);
       const tag = e.target?.tagName;
       const expanded = isMoreOptionsExpanded();
