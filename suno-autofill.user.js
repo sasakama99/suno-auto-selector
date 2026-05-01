@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Suno AutoFill（プリセット自動入力）
 // @namespace    https://github.com/sasakama99/suno-auto-selector
-// @version      3.10.0
+// @version      3.11.0
 // @description  Sunoの作曲フォームにプリセットを保存・自動入力するツール
 // @author       ハリたっく
 // @match        https://suno.com/*
@@ -122,15 +122,20 @@
     return false;
   }
 
-  // ボタンがアクティブ（選択済み）か判定
+  // ボタンがアクティブ（選択済み）か判定（要素本体と親3段まで確認）
   function isButtonActive(el) {
     if (!el) return false;
-    return el.getAttribute('aria-pressed') === 'true' ||
-           el.getAttribute('data-state') === 'on' ||
-           el.getAttribute('data-state') === 'active' ||
-           el.getAttribute('data-active') === 'true' ||
-           el.classList.contains('active') ||
-           el.classList.contains('selected');
+    let depth = 0;
+    for (let e = el; e && e !== document.body && depth <= 3; e = e.parentElement, depth++) {
+      if (e.getAttribute('aria-pressed') === 'true') return true;
+      const ds = e.getAttribute('data-state');
+      if (ds === 'on' || ds === 'active' || ds === 'checked') return true;
+      if (e.getAttribute('data-active') === 'true') return true;
+      if (e.getAttribute('aria-selected') === 'true') return true;
+      if (e.getAttribute('aria-checked') === 'true') return true;
+      if (e.classList.contains('active') || e.classList.contains('selected')) return true;
+    }
+    return false;
   }
 
   // 確実にReactに反応するクリック（pointerdown → mousedown → ... → click）
@@ -173,6 +178,29 @@
       el.dispatchEvent(new Event('input', { bubbles: true }));
       return false;
     }
+  }
+
+  // execCommand('insertText') 経由でテキスト設定（React の合成イベントに確実に通知）
+  function setTextByExecCommand(el, value) {
+    if (!el) return false;
+    try {
+      el.focus();
+      // 全選択してから挿入（textarea / contenteditable 両対応）
+      if (el.select) el.select();
+      else {
+        const range = document.createRange();
+        range.selectNodeContents(el);
+        const sel = window.getSelection();
+        sel.removeAllRanges();
+        sel.addRange(range);
+      }
+      const ok = document.execCommand('insertText', false, value);
+      if (!ok) {
+        // execCommand が無効な環境: native setter にフォールバック
+        setNativeValue(el, value);
+      }
+      return true;
+    } catch (e) { return false; }
   }
 
   // テキストでクリック可能要素を探す（自分のパネル内は除外）
@@ -290,17 +318,25 @@
       return { ok: false, method: 'no-thumb' };
     }
 
-    // 方法①: React fiber 経由（onValueChange([percent]) を直接呼ぶ — 最確実）
+    // 方法①: サムをドラッグしてトラック目標位置まで移動（手動操作と同じシーケンス）
+    const dragOk = await dragSliderThumb(thumb, percent);
+    if (dragOk) {
+      await sleep(120);
+      const after = parseInt(thumb.getAttribute('aria-valuenow') || '-1');
+      console.log(`[SunoAutoFill] drag: target=${percent}, aria-valuenow=${after}`);
+      if (after >= 0 && Math.abs(after - percent) <= 2) return { ok: true, method: 'drag' };
+    }
+
+    // 方法②: React fiber 経由（onValueChange([percent]) を直接呼ぶ）
     const reactOk = callReactHandler(thumb, percent, ['onValueChange', 'onValueCommit']);
     if (reactOk) {
       await sleep(150);
       const after = parseInt(thumb.getAttribute('aria-valuenow') || '-1');
       console.log(`[SunoAutoFill] react: target=${percent}, aria-valuenow=${after}`);
       if (after >= 0 && Math.abs(after - percent) <= 2) return { ok: true, method: 'react' };
-      // aria-valuenow が更新されなくてもハンドラが呼べた場合はポインター補完
     }
 
-    // 方法②: トラッククリック（ポインターイベント）
+    // 方法③: トラッククリック（ポインターイベント）
     if (setRadixSliderByTrackPointer(thumb, percent)) {
       await sleep(80);
       const after = parseInt(thumb.getAttribute('aria-valuenow') || '-1');
@@ -308,10 +344,89 @@
       if (after >= 0 && Math.abs(after - percent) <= 2) return { ok: true, method: 'track-pointer' };
     }
 
-    // 方法③: キーボード（Home → ArrowRight×N）
-    if (setRadixSliderByKeyboard(thumb, percent)) return { ok: true, method: 'keyboard' };
+    // 方法④: キーボード（現在値から相対移動）
+    if (await setRadixSliderRelative(thumb, percent)) return { ok: true, method: 'keyboard-rel' };
 
     return { ok: false, method: 'all-failed' };
+  }
+
+  // サムを現在位置からターゲット位置までドラッグするシミュレーション
+  async function dragSliderThumb(thumb, percent) {
+    try {
+      const thumbRect = thumb.getBoundingClientRect();
+      if (thumbRect.width === 0 && thumbRect.height === 0) return false;
+
+      // トラック（ルート）を探す
+      let root = thumb;
+      for (let i = 0; i < 8; i++) {
+        if (!root.parentElement) break;
+        root = root.parentElement;
+        const r = root.getBoundingClientRect();
+        if (r.width > 100 && r.height < 80) break;
+      }
+      const rootRect = root.getBoundingClientRect();
+      if (rootRect.width === 0) return false;
+
+      const startX = thumbRect.left + thumbRect.width / 2;
+      const startY = thumbRect.top + thumbRect.height / 2;
+      const targetX = rootRect.left + rootRect.width * (percent / 100);
+      const targetY = startY;
+
+      const mkOpts = (x, y, btns) => ({
+        bubbles: true, cancelable: true,
+        clientX: x, clientY: y,
+        pointerId: 1, pointerType: 'mouse', isPrimary: true,
+        button: 0, buttons: btns
+      });
+
+      // pointerdown on thumb
+      thumb.dispatchEvent(new PointerEvent('pointerdown', mkOpts(startX, startY, 1)));
+      thumb.dispatchEvent(new MouseEvent('mousedown',     mkOpts(startX, startY, 1)));
+      await sleep(30);
+
+      // pointermove to target (thumb → track root → document)
+      const moveOpts = mkOpts(targetX, targetY, 1);
+      thumb.dispatchEvent(new PointerEvent('pointermove', moveOpts));
+      root.dispatchEvent(new PointerEvent('pointermove',  moveOpts));
+      document.dispatchEvent(new PointerEvent('pointermove', moveOpts));
+      document.dispatchEvent(new MouseEvent('mousemove',     moveOpts));
+      await sleep(30);
+
+      // pointerup
+      document.dispatchEvent(new PointerEvent('pointerup', mkOpts(targetX, targetY, 0)));
+      document.dispatchEvent(new MouseEvent('mouseup',      mkOpts(targetX, targetY, 0)));
+      return true;
+    } catch (e) {
+      console.log('[SunoAutoFill] dragSliderThumb error:', e);
+      return false;
+    }
+  }
+
+  // キーボード相対移動（Home+絶対移動ではなく現在値からの差分で動かす）
+  async function setRadixSliderRelative(thumb, percent) {
+    try {
+      // サムをクリックしてフォーカス・Reactでアクティブ化
+      const r = thumb.getBoundingClientRect();
+      const cx = r.left + r.width / 2, cy = r.top + r.height / 2;
+      const opts = { bubbles: true, cancelable: true, clientX: cx, clientY: cy,
+                     pointerId: 1, pointerType: 'mouse', isPrimary: true, button: 0, buttons: 1 };
+      thumb.dispatchEvent(new PointerEvent('pointerdown', opts));
+      thumb.dispatchEvent(new PointerEvent('pointerup',   { ...opts, buttons: 0 }));
+      await sleep(50);
+      thumb.focus();
+
+      const current = parseInt(thumb.getAttribute('aria-valuenow') || '50');
+      const delta = percent - current;
+      if (delta === 0) return true;
+      const key = delta > 0 ? 'ArrowRight' : 'ArrowLeft';
+      for (let i = 0; i < Math.abs(delta); i++) {
+        thumb.dispatchEvent(new KeyboardEvent('keydown', { key, bubbles: true, cancelable: true }));
+        thumb.dispatchEvent(new KeyboardEvent('keyup',   { key, bubbles: true, cancelable: true }));
+      }
+      await sleep(50);
+      const after = parseInt(thumb.getAttribute('aria-valuenow') || '-1');
+      return after >= 0 && Math.abs(after - percent) <= 2;
+    } catch (e) { return false; }
   }
 
   // 方法1: Home で 0 に戻してから ArrowRight 連打（Radix UI で最も確実）
@@ -691,18 +806,33 @@
     results.push(['MoreOptions展開', expanded]);
     console.log(`[SunoAutoFill] applyPreset 開始時 MoreOpt=${expanded ? 'OPEN' : 'CLOSED'}`);
 
-    // === Lyrics: placeholderマッチ → 1番目のtextareaフォールバック ===
+    // === Lyrics: execCommand優先（Reactの合成イベントに確実に通知） ===
     const sunoTextareas = getSunoTextareas();
-    let lyrics = findByPlaceholder(['lyrics', 'instrumental'], 'textarea');
+    let lyrics = findByPlaceholder(['lyrics', 'instrumental', 'enter', 'add', 'write'], 'textarea');
     if (!lyrics && sunoTextareas.length >= 1) lyrics = sunoTextareas[0];
     console.log('[SunoAutoFill] Lyrics target:', lyrics?.placeholder, lyrics);
-    results.push(['Lyrics',  lyrics ? setNativeValue(lyrics, p.lyrics || '') : false]);
+    if (lyrics) {
+      setTextByExecCommand(lyrics, p.lyrics || '');
+      await sleep(80);
+      // execCommand 後に値が反映されていなければ native setter で補完
+      if (lyrics.value !== (p.lyrics || '')) setNativeValue(lyrics, p.lyrics || '');
+      results.push(['Lyrics', true]);
+    } else {
+      results.push(['Lyrics', false]);
+    }
 
-    // === Styles: placeholderマッチ → 2番目のtextareaフォールバック ===
-    let styles = findByPlaceholder(['style', 'genre', 'mood'], 'textarea');
+    // === Styles: execCommand優先 ===
+    let styles = findByPlaceholder(['style', 'genre', 'mood', 'musical'], 'textarea');
     if (!styles && sunoTextareas.length >= 2) styles = sunoTextareas[1];
     console.log('[SunoAutoFill] Styles target:', styles?.placeholder, styles);
-    results.push(['Styles',  styles ? setNativeValue(styles, p.styles || '') : false]);
+    if (styles) {
+      setTextByExecCommand(styles, p.styles || '');
+      await sleep(80);
+      if (styles.value !== (p.styles || '')) setNativeValue(styles, p.styles || '');
+      results.push(['Styles', true]);
+    } else {
+      results.push(['Styles', false]);
+    }
 
     // Exclude（More Options が展開されていないと無い）
     const exclude = findByPlaceholder(['exclude'], 'input');
