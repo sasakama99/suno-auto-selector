@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Suno AutoFill（プリセット自動入力）
 // @namespace    https://github.com/sasakama99/suno-auto-selector
-// @version      3.2.0
+// @version      3.3.0
 // @description  Sunoの作曲フォームにプリセットを保存・自動入力するツール
 // @author       ハリたっく
 // @match        https://suno.com/*
@@ -427,10 +427,20 @@
       return matches;
     }
 
-    function clickItem() {
+    function clickItem(skipEl) {
+      // skipEl（トリガーボタン）と aria-haspopup を持つ要素は誤クリック防止
+      function isTrigger(el) {
+        if (!el) return false;
+        if (skipEl && (el === skipEl || skipEl.contains(el) || el.contains(skipEl))) return true;
+        if (el.hasAttribute('aria-haspopup')) return true;
+        if (el.getAttribute('aria-expanded') === 'true' && el.tagName === 'BUTTON') return true;
+        return false;
+      }
+
       // 1) data-value 完全一致を最優先
       for (const item of document.body.querySelectorAll('[data-value]')) {
         if (panel && panel.contains(item)) continue;
+        if (isTrigger(item)) continue;
         const dv = norm(item.getAttribute('data-value') || '');
         if (dv === norm(ver) || dv.startsWith(norm(ver) + ' ')) {
           const rect = item.getBoundingClientRect();
@@ -445,6 +455,7 @@
       const selector = '[data-radix-collection-item], [cmdk-item], [role="option"], [role="menuitem"], [role="listitem"]';
       for (const item of document.body.querySelectorAll(selector)) {
         if (panel && panel.contains(item)) continue;
+        if (isTrigger(item)) continue;
         if (!versionMatch(item.textContent, ver)) continue;
         const rect = item.getBoundingClientRect();
         if (rect.width === 0) continue;
@@ -453,23 +464,28 @@
         return true;
       }
 
-      // 3) フォールバック: 任意の要素で「v5.5」始まりの可視リーフ要素
-      for (const el of document.body.querySelectorAll('div, button, span, li, a')) {
-        if (panel && panel.contains(el)) continue;
-        if (el.children.length > 8) continue;
-        if (!versionMatch(el.textContent, ver)) continue;
-        const rect = el.getBoundingClientRect();
-        if (rect.width === 0 || rect.height === 0) continue;
-        // 可視性チェック
-        const style = getComputedStyle(el);
-        if (style.display === 'none' || style.visibility === 'hidden') continue;
-        if (style.pointerEvents === 'none') continue;
-        realClick(el);
-        console.log('[SunoAutoFill] Version item クリック(fallback):', norm(el.textContent).slice(0, 60), 'tag:', el.tagName);
-        return true;
+      // 3) フォールバック: ドロップダウンコンテナ内の可視リーフ要素のみ
+      const containers = document.body.querySelectorAll(
+        '[role="menu"], [role="listbox"], [role="dialog"], [data-state="open"], ' +
+        '[class*="dropdown"], [class*="Dropdown"], [class*="popover"], [class*="Popover"]'
+      );
+      for (const cont of containers) {
+        if (panel && panel.contains(cont)) continue;
+        for (const el of cont.querySelectorAll('div, button, span, li, a')) {
+          if (panel && panel.contains(el)) continue;
+          if (isTrigger(el)) continue;
+          if (el.children.length > 8) continue;
+          if (!versionMatch(el.textContent, ver)) continue;
+          const rect = el.getBoundingClientRect();
+          if (rect.width === 0) continue;
+          const style = getComputedStyle(el);
+          if (style.display === 'none' || style.visibility === 'hidden' || style.pointerEvents === 'none') continue;
+          realClick(el);
+          console.log('[SunoAutoFill] Version item クリック(fallback):', norm(el.textContent).slice(0, 60));
+          return true;
+        }
       }
 
-      // 何も見つからなければ診断情報を出す
       diagnoseDropdown();
       return false;
     }
@@ -498,12 +514,11 @@
     triggerClicked = true;
     await sleep(700);
 
-    // 開いた直後の状態を診断（必ず実行）
     diagnoseDropdown();
 
-    if (clickItem()) return { ok: true, method: 'trigger' };
+    if (clickItem(triggerBtn)) return { ok: true, method: 'trigger' };
     await sleep(600);
-    if (clickItem()) return { ok: true, method: 'trigger-late' };
+    if (clickItem(triggerBtn)) return { ok: true, method: 'trigger-late' };
 
     console.log('[SunoAutoFill] Version item を見つけられず');
     return { ok: false, method: 'no-item' };
@@ -605,13 +620,15 @@
     const clickListener = (e) => {
       const t = (e.target?.textContent || '').trim().slice(0, 40);
       const tag = e.target?.tagName;
-      clickLog.push(`<${tag}> "${t}"`);
+      const expanded = isMoreOptionsExpanded();
+      clickLog.push(`<${tag}> "${t}" [MoreOpt=${expanded ? 'OPEN' : 'CLOSED'}]`);
     };
     document.addEventListener('click', clickListener, true);
 
     // More Options を自動展開（閉じている場合のみ）
     const expanded = await expandMoreOptions();
     results.push(['MoreOptions展開', expanded]);
+    console.log(`[SunoAutoFill] applyPreset 開始時 MoreOpt=${expanded ? 'OPEN' : 'CLOSED'}`);
 
     // === Lyrics: placeholderマッチ → 1番目のtextareaフォールバック ===
     const sunoTextareas = getSunoTextareas();
@@ -669,6 +686,10 @@
       const r = await setVersion(p.version);
       results.push([`Version(${r.method})`, r.ok]);
     }
+
+    // 適用後の状態
+    const finalState = isMoreOptionsExpanded();
+    console.log(`[SunoAutoFill] applyPreset 終了時 MoreOpt=${finalState ? 'OPEN' : 'CLOSED'}`);
 
     // クリック監視を解除して全クリックを表示
     document.removeEventListener('click', clickListener, true);
@@ -887,7 +908,6 @@
 
         <div class="af-fld-label">Version</div>
         <div class="af-row">
-          <button class="af-btn" data-grp="ver" data-val="none">指定なし</button>
           <button class="af-btn" data-grp="ver" data-val="v5.5">v5.5</button>
           <button class="af-btn" data-grp="ver" data-val="v5">v5</button>
           <button class="af-btn" data-grp="ver" data-val="v4.5+">v4.5+</button>
