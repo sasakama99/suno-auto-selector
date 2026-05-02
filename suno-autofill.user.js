@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Suno AutoFill（プリセット自動入力）
 // @namespace    https://github.com/sasakama99/suno-auto-selector
-// @version      3.19.0
+// @version      3.19.1
 // @description  Sunoの作曲フォームにプリセットを保存・自動入力するツール
 // @author       ハリたっく
 // @match        https://suno.com/*
@@ -373,11 +373,6 @@
       return parseInt(thumb.getAttribute('aria-valuenow') ?? '-1');
     };
 
-    // 方法0: React useState の内部 dispatch を直接呼ぶ（最も確実）
-    // aria-valuenow の値と一致するフックを探してそのsetterを呼ぶ
-    const hookOk = await setSliderViaHookDispatch(thumb, percent, beforeVal);
-    if (hookOk) return { ok: true, method: `hook-dispatch→${percent}` };
-
     // 方法①: キーボード直接（現在値から目標値まで1%ずつ移動）
     // React 18バッチング対策済み: sleep(16)で各ステップを個別処理
     const keyResult = await fineTune(beforeVal);
@@ -454,54 +449,6 @@
     const finalVal = parseInt(thumb.getAttribute('aria-valuenow') ?? '-1');
     console.log(`[SunoAutoFill] 全方法失敗: target=${percent}, final=${finalVal}`);
     return { ok: false, method: `all-failed(got:${finalVal})` };
-  }
-
-  // 方法0: Reactのusestate内部dispatchを直接呼ぶ
-  // フィバーツリーを上方向に辿り aria-valuenow と一致するhookのdispatchを実行
-  async function setSliderViaHookDispatch(thumb, percent, currentAria) {
-    try {
-      const rkName = Object.keys(thumb).find(k =>
-        k.startsWith('__reactFiber') || k.startsWith('__reactInternals')
-      );
-      if (!rkName) return false;
-
-      let fiber = thumb[rkName];
-      while (fiber) {
-        let hook = fiber.memoizedState;
-        while (hook) {
-          const st  = hook.memoizedState;
-          const dispatch = hook.queue?.dispatch;
-
-          if (typeof dispatch === 'function') {
-            // 数値または[数値]でaria-valuenowと近い値を持つhookを探す
-            const num = Array.isArray(st) && st.length === 1 ? st[0] : st;
-            if (typeof num === 'number' && num >= 0 && num <= 100 &&
-                (currentAria < 0 || Math.abs(num - currentAria) <= 2)) {
-
-              console.log(`[SunoAutoFill] hookDispatch: state=${JSON.stringify(st)}, dispatch([${percent}])`);
-
-              // number配列 or 数値のどちらか試す
-              const variants = Array.isArray(st) ? [[percent], percent] : [percent, [percent]];
-              for (const val of variants) {
-                try {
-                  dispatch(val);
-                  await sleep(200);
-                  const after = parseInt(thumb.getAttribute('aria-valuenow') ?? '-1');
-                  console.log(`[SunoAutoFill] hookDispatch result: val=${JSON.stringify(val)}, after=${after}`);
-                  if (after >= 0 && Math.abs(after - percent) <= 3) return true;
-                } catch(e) {}
-              }
-            }
-          }
-          hook = hook.next;
-        }
-        fiber = fiber.return;
-      }
-      return false;
-    } catch(e) {
-      console.log('[SunoAutoFill] hookDispatch error:', e.message);
-      return false;
-    }
   }
 
   // ① トラックの目標位置を直接クリック（Radixのtrack-clickで値を設定）
