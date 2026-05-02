@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Suno AI Auto Selector by Title (集計版)
 // @namespace    https://github.com/sasakama99/suno-auto-selector
-// @version      1.1.1
+// @version      1.1.2
 // @description  タイトルを入力するだけで完全一致する曲を自動選択し、曲数と合計時間を集計
 // @author       ハリたっく
 // @match        https://suno.com/*
@@ -55,7 +55,7 @@
         const panel = document.createElement('div');
         panel.id = 'suno-auto-panel';
         panel.style.cssText = `
-            position: fixed; top: 610px; left: 6px; z-index: 9999998;
+            position: fixed; top: 575px; left: 6px; z-index: 9999998;
             background: rgb(18, 18, 18);
             border: 1px solid #555; border-radius: 12px;
             padding: 8px 10px; width: 196px;
