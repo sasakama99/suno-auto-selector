@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Suno AutoFill（プリセット自動入力）
 // @namespace    https://github.com/sasakama99/suno-auto-selector
-// @version      3.18.0
+// @version      3.18.1
 // @description  Sunoの作曲フォームにプリセットを保存・自動入力するツール
 // @author       ハリたっく
 // @match        https://suno.com/*
@@ -1376,6 +1376,7 @@
     panel.innerHTML = `
       <div class="af-hd">
         <span class="af-title">🎵 Suno AutoFill</span>
+        <button class="af-iconbtn" id="af-update" title="スクリプトを更新（Tampermonkey）">🔄</button>
         <button class="af-iconbtn" id="af-collapse">▼</button>
       </div>
       <div class="af-body" id="af-body">
@@ -1465,6 +1466,10 @@
     });
 
     // ===== その他のイベント =====
+    document.getElementById('af-update').onclick = () => {
+      window.open('https://raw.githubusercontent.com/sasakama99/suno-auto-selector/main/suno-autofill.user.js', '_blank');
+    };
+
     document.getElementById('af-collapse').onclick = () => {
       const body = document.getElementById('af-body');
       const btn = document.getElementById('af-collapse');
