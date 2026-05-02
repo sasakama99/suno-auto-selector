@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Suno AI Auto Selector by Title (集計版)
 // @namespace    https://github.com/sasakama99/suno-auto-selector
-// @version      1.0.7
+// @version      1.0.8
 // @description  タイトルを入力するだけで完全一致する曲を自動選択し、曲数と合計時間を集計
 // @author       ハリたっく
 // @match        https://suno.com/*
@@ -38,6 +38,13 @@
             box-sizing: border-box !important;
             max-width: 100% !important;
         }
+        #suno-auto-panel .af-title {
+            white-space: nowrap !important;
+            overflow: hidden !important;
+            text-overflow: ellipsis !important;
+            flex: 1 !important;
+            min-width: 0 !important;
+        }
         #suno-auto-panel input::placeholder,
         #suno-auto-panel textarea::placeholder {
             color: #666;
@@ -51,7 +58,7 @@
         panel.id = 'suno-auto-panel';
         panel.style.cssText = `
             position: fixed; top: 370px; left: 8px; z-index: 9999998;
-            background: rgba(18, 18, 18, 0.97);
+            background: rgb(18, 18, 18);
             border: 1px solid #555; border-radius: 12px;
             padding: 8px 10px; width: 215px;
             box-shadow: 0 4px 20px rgba(0,0,0,0.7);
@@ -67,8 +74,9 @@
         `;
 
         const title = document.createElement('div');
-        title.textContent = '🎯 タイトル自動選択';
-        title.style.cssText = 'font-weight: 600; font-size: 12px; color: #ffb84d; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; flex: 1;';
+        title.className = 'af-title';
+        title.textContent = '🎯 自動選択';
+        title.style.cssText = 'font-weight: 600; font-size: 12px; color: #ffb84d;';
         header.appendChild(title);
 
         const toggleBtn = document.createElement('button');
