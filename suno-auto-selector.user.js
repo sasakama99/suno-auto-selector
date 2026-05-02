@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Suno AI Auto Selector by Title (集計版)
 // @namespace    https://github.com/sasakama99/suno-auto-selector
-// @version      1.0.1
+// @version      1.0.2
 // @description  タイトルを入力するだけで完全一致する曲を自動選択し、曲数と合計時間を集計
 // @author       ハリたっく
 // @match        https://suno.com/*
@@ -38,7 +38,7 @@
             position: fixed; top: 370px; left: 8px; z-index: 9999998;
             background: rgba(18, 18, 18, 0.97);
             border: 1px solid #555; border-radius: 12px;
-            padding: 14px; width: 212px;
+            padding: 10px 12px; width: 212px;
             box-shadow: 0 4px 20px rgba(0,0,0,0.7);
             font-family: -apple-system, "Hiragino Sans", sans-serif;
             color: #eee;
@@ -48,30 +48,33 @@
         const header = document.createElement('div');
         header.style.cssText = `
             display: flex; justify-content: space-between; align-items: center;
-            margin-bottom: 10px;
+            margin-bottom: 0;
         `;
 
         const title = document.createElement('div');
         title.textContent = '🎯 タイトル自動選択';
-        title.style.cssText = 'font-weight: bold; font-size: 14px; color: #ffb84d;';
+        title.style.cssText = 'font-weight: 600; font-size: 13px; color: #ffb84d;';
         header.appendChild(title);
 
         const toggleBtn = document.createElement('button');
-        toggleBtn.textContent = '▼';
+        toggleBtn.textContent = '▲';
         toggleBtn.style.cssText = `
             background: transparent; border: none; color: #aaa;
-            cursor: pointer; font-size: 12px; padding: 2px 6px;
+            cursor: pointer; font-size: 11px; padding: 2px 4px;
         `;
-        let collapsed = false;
+        // デフォルトは閉じた状態
+        let collapsed = true;
         toggleBtn.onclick = () => {
             collapsed = !collapsed;
             body.style.display = collapsed ? 'none' : 'block';
+            header.style.marginBottom = collapsed ? '0' : '10px';
             toggleBtn.textContent = collapsed ? '▲' : '▼';
         };
         header.appendChild(toggleBtn);
         panel.appendChild(header);
 
         const body = document.createElement('div');
+        body.style.display = 'none'; // 最初は閉じた状態
 
         const desc = document.createElement('div');
         desc.style.cssText = `
