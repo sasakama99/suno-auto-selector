@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Suno AI Auto Selector by Title (集計版)
 // @namespace    https://github.com/sasakama99/suno-auto-selector
-// @version      1.2.0
+// @version      1.1.2
 // @description  タイトルを入力するだけで完全一致する曲を自動選択し、曲数と合計時間を集計
 // @author       ハリたっく
 // @match        https://suno.com/*
@@ -27,6 +27,8 @@
         #suno-auto-panel {
             position: fixed !important;
             right: auto !important;
+            width: 196px !important;
+            max-width: 196px !important;
             box-sizing: border-box !important;
             overflow: hidden !important;
         }
@@ -53,7 +55,7 @@
         const panel = document.createElement('div');
         panel.id = 'suno-auto-panel';
         panel.style.cssText = `
-            position: fixed; top: 0; left: 0; z-index: 9999998;
+            position: fixed; top: 575px; left: 6px; z-index: 9999998;
             background: rgb(18, 18, 18);
             border: 1px solid #555; border-radius: 12px;
             padding: 8px 10px; width: 196px;
@@ -171,45 +173,6 @@
             _drag = false;
             header.style.cursor = 'grab';
         });
-
-        // Notifications の直下に追従（リサイズ・レイアウト変化に対応）
-        anchorPanel();
-        window.addEventListener('resize', anchorPanel);
-    }
-
-    function anchorPanel() {
-        const panel = document.getElementById('suno-auto-panel');
-        if (!panel) return;
-
-        // Notifications 要素を探す
-        let notifEl = null;
-        for (const el of document.querySelectorAll('a, button, div, li, span')) {
-            if (el.children.length > 4) continue;
-            if ((el.textContent || '').trim() !== 'Notifications') continue;
-            const r = el.getBoundingClientRect();
-            if (r.width > 50 && r.height > 10 && r.top > 50) {
-                notifEl = el; break;
-            }
-        }
-        if (!notifEl) return;
-
-        // サイドバーの幅と左端を取得
-        let sidebarLeft = 0, sidebarWidth = 210;
-        for (let el = notifEl.parentElement; el && el !== document.body; el = el.parentElement) {
-            const r = el.getBoundingClientRect();
-            if (r.left <= 10 && r.width > 100 && r.width < 400) {
-                sidebarLeft = r.left;
-                sidebarWidth = r.width;
-                break;
-            }
-        }
-
-        const nr = notifEl.getBoundingClientRect();
-        const w = sidebarWidth - 12;
-        panel.style.top   = (nr.bottom + 6) + 'px';
-        panel.style.left  = (sidebarLeft + 6) + 'px';
-        panel.style.width = w + 'px';
-        panel.style.maxWidth = w + 'px';
     }
 
     let inputDebounceTimer = null;
