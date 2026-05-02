@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Suno AI Auto Selector by Title (集計版)
 // @namespace    https://github.com/sasakama99/suno-auto-selector
-// @version      1.0.8
+// @version      1.0.9
 // @description  タイトルを入力するだけで完全一致する曲を自動選択し、曲数と合計時間を集計
 // @author       ハリたっく
 // @match        https://suno.com/*
@@ -26,8 +26,6 @@
         }
         #suno-auto-panel {
             position: fixed !important;
-            top: 370px !important;
-            left: 8px !important;
             right: auto !important;
             width: 215px !important;
             max-width: 215px !important;
@@ -71,6 +69,7 @@
         header.style.cssText = `
             display: flex; justify-content: space-between; align-items: center;
             flex-wrap: nowrap; gap: 4px; margin-bottom: 0;
+            cursor: grab;
         `;
 
         const title = document.createElement('div');
@@ -151,6 +150,29 @@
 
         panel.appendChild(body);
         document.body.appendChild(panel);
+
+        // ドラッグ移動
+        let _drag = false, _dx = 0, _dy = 0;
+        header.addEventListener('mousedown', e => {
+            if (e.target.closest('button')) return;
+            _drag = true;
+            const r = panel.getBoundingClientRect();
+            _dx = e.clientX - r.left;
+            _dy = e.clientY - r.top;
+            header.style.cursor = 'grabbing';
+            panel.style.transition = 'none';
+            e.preventDefault();
+        });
+        document.addEventListener('mousemove', e => {
+            if (!_drag) return;
+            panel.style.left = (e.clientX - _dx) + 'px';
+            panel.style.top  = (e.clientY - _dy) + 'px';
+        });
+        document.addEventListener('mouseup', () => {
+            if (!_drag) return;
+            _drag = false;
+            header.style.cursor = 'grab';
+        });
     }
 
     let inputDebounceTimer = null;
