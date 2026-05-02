@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Suno AutoFill（プリセット自動入力）
 // @namespace    https://github.com/sasakama99/suno-auto-selector
-// @version      3.22.0
+// @version      3.23.0
 // @description  Sunoの作曲フォームにプリセットを保存・自動入力するツール
 // @author       ハリたっく
 // @match        https://suno.com/*
@@ -146,7 +146,16 @@
       console.log(`[SunoAutoFill] realClick: <${el.tagName}> "${txt}"`);
       el.scrollIntoView?.({ block: 'center' });
       el.focus?.();
-      el.click(); // ネイティブクリックのみ（PointerEvent不使用 → Radixクラッシュ回避）
+      // MouseEventは送る（Radix Selectのドロップダウン開閉に必要）
+      // PointerEventは送らない（Radix Sliderのsetpointercaptureクラッシュ回避）
+      const r = el.getBoundingClientRect();
+      const x = r.left + r.width / 2;
+      const y = r.top + r.height / 2;
+      const opts = { bubbles: true, cancelable: true, composed: true,
+                     clientX: x, clientY: y, button: 0, buttons: 1 };
+      el.dispatchEvent(new MouseEvent('mousedown', opts));
+      el.dispatchEvent(new MouseEvent('mouseup', { ...opts, buttons: 0 }));
+      el.click();
       return true;
     } catch (e) { return false; }
   }
@@ -347,26 +356,7 @@
       return parseInt(thumb.getAttribute('aria-valuenow') ?? '-1');
     };
 
-    // 方法①: 現在値から目標値へキーボードで直接移動（sleep(16)で1ステップずつ）
-    const r1 = await sendKeys(beforeVal);
-    console.log(`[SunoAutoFill] keyboard: target=${percent}, result=${r1}`);
-    if (r1 >= 0 && Math.abs(r1 - percent) <= 3) return { ok: true, method: `key→${r1}` };
-
-    // 方法②: Home で 0 に戻してから ArrowRight × percent
-    thumb.focus();
-    await sleep(40);
-    thumb.dispatchEvent(new KeyboardEvent('keydown', { key:'Home', keyCode:36, code:'Home', bubbles:true, cancelable:true, composed:true }));
-    thumb.dispatchEvent(new KeyboardEvent('keyup',   { key:'Home', keyCode:36, code:'Home', bubbles:true, cancelable:true, composed:true }));
-    await sleep(100);
-    const atZero = parseInt(thumb.getAttribute('aria-valuenow') ?? '-1');
-    console.log(`[SunoAutoFill] Home後: atZero=${atZero}`);
-    if (atZero >= 0 && atZero !== beforeVal) {
-      const r2 = await sendKeys(atZero);
-      console.log(`[SunoAutoFill] Home+key: target=${percent}, result=${r2}`);
-      if (r2 >= 0 && Math.abs(r2 - percent) <= 3) return { ok: true, method: `home+key→${r2}` };
-    }
-
-    // 方法③: React fiber の onValueChange を直接呼ぶ（ポインターイベント不使用）
+    // 方法①: React fiber の onValueChange を直接呼ぶ（イベント不要・最も確実）
     const sliderRoot = thumb.closest('[data-radix-slider-root]') || thumb.parentElement;
     for (let el = sliderRoot; el && el !== document.body; el = el.parentElement) {
       const rk = reactKey(el);
@@ -383,11 +373,32 @@
               const after = parseInt(thumb.getAttribute('aria-valuenow') ?? '-1');
               console.log(`[SunoAutoFill] fiber: target=${percent}, after=${after}`);
               if (after >= 0 && Math.abs(after - percent) <= 3) return { ok: true, method: `fiber→${after}` };
-            } catch(e) {}
+            } catch(e) {
+              console.log('[SunoAutoFill] fiber error:', e);
+            }
           }
         }
         f = f.return;
       }
+    }
+
+    // 方法②: 現在値から目標値へキーボードで直接移動（sleep(16)で1ステップずつ）
+    const r1 = await sendKeys(beforeVal);
+    console.log(`[SunoAutoFill] keyboard: target=${percent}, result=${r1}`);
+    if (r1 >= 0 && Math.abs(r1 - percent) <= 3) return { ok: true, method: `key→${r1}` };
+
+    // 方法③: Home で 0 に戻してから ArrowRight × percent
+    thumb.focus();
+    await sleep(40);
+    thumb.dispatchEvent(new KeyboardEvent('keydown', { key:'Home', keyCode:36, code:'Home', bubbles:true, cancelable:true, composed:true }));
+    thumb.dispatchEvent(new KeyboardEvent('keyup',   { key:'Home', keyCode:36, code:'Home', bubbles:true, cancelable:true, composed:true }));
+    await sleep(100);
+    const atZero = parseInt(thumb.getAttribute('aria-valuenow') ?? '-1');
+    console.log(`[SunoAutoFill] Home後: atZero=${atZero}`);
+    if (atZero >= 0 && atZero !== beforeVal) {
+      const r2 = await sendKeys(atZero);
+      console.log(`[SunoAutoFill] Home+key: target=${percent}, result=${r2}`);
+      if (r2 >= 0 && Math.abs(r2 - percent) <= 3) return { ok: true, method: `home+key→${r2}` };
     }
 
     const finalVal = parseInt(thumb.getAttribute('aria-valuenow') ?? '-1');
