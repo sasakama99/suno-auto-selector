@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Suno AutoFill（プリセット自動入力）
 // @namespace    https://github.com/sasakama99/suno-auto-selector
-// @version      3.19.2
+// @version      3.20.0
 // @description  Sunoの作曲フォームにプリセットを保存・自動入力するツール
 // @author       ハリたっく
 // @match        https://suno.com/*
@@ -146,17 +146,7 @@
       console.log(`[SunoAutoFill] realClick: <${el.tagName}> "${txt}"`);
       el.scrollIntoView?.({ block: 'center' });
       el.focus?.();
-      const r = el.getBoundingClientRect();
-      const x = r.left + r.width / 2;
-      const y = r.top + r.height / 2;
-      const opts = { bubbles: true, cancelable: true, clientX: x, clientY: y, button: 0, buttons: 1 };
-      for (const type of ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click']) {
-        if (type.startsWith('pointer')) {
-          el.dispatchEvent(new PointerEvent(type, { ...opts, pointerId: 1, pointerType: 'mouse', isPrimary: true }));
-        } else {
-          el.dispatchEvent(new MouseEvent(type, opts));
-        }
-      }
+      el.click(); // ネイティブクリックのみ（PointerEvent不使用 → Radixクラッシュ回避）
       return true;
     } catch (e) { return false; }
   }
@@ -289,6 +279,12 @@
   //         ③React fiber直呼び ④キーボード
   // =========================================================
   async function setSlider(labelText, percent) {
+    // スライダーは合成イベントでは操作不可（Radix setPointerCapture クラッシュ）
+    // → Chrome拡張版で対応。Tampermonkey版ではスキップ。
+    console.log(`[SunoAutoFill] setSlider "${labelText}" (${percent}%): スキップ（Chrome拡張で操作してください）`);
+    return { ok: false, method: 'skip' };
+
+    // --- 以下は参考用（使用停止） ---
     const ln = norm(labelText);
     const panel = document.getElementById('suno-af-panel');
 
@@ -1114,18 +1110,16 @@
       results.push(['Auto',   b ? realClick(b) : false]);
     }
 
-    // スライダー（MoreOptions が完全にレンダリングされるまで待機）
-    await sleep(800);
-    if (p.weirdness !== undefined) {
-      const r = await setSlider('Weirdness', p.weirdness);
-      results.push([`Weirdness(${r.method})`, r.ok]);
+    // スライダー（スキップ — Chrome拡張で対応）
+    const needSlider = (p.weirdness !== undefined && p.weirdness !== 50) ||
+                       (p.styleInfluence !== undefined && p.styleInfluence !== 50);
+    if (needSlider) {
+      const w = p.weirdness ?? 50;
+      const s = p.styleInfluence ?? 50;
+      showToast(`🎚️ スライダーは手動で設定してください\nWeirdness: ${w}%　Style Influence: ${s}%`, 5000);
     }
-    // Weirdness操作後のReact再レンダリングが完了するまで待つ
-    await sleep(500);
-    if (p.styleInfluence !== undefined) {
-      const r = await setSlider('Style Influence', p.styleInfluence);
-      results.push([`Influence(${r.method})`, r.ok]);
-    }
+    if (p.weirdness !== undefined) results.push([`Weirdness(skip)`, false]);
+    if (p.styleInfluence !== undefined) results.push([`Influence(skip)`, false]);
 
     // バージョン
     if (p.version && p.version !== 'none') {
