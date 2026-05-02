@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Suno AutoFill（プリセット自動入力）
 // @namespace    https://github.com/sasakama99/suno-auto-selector
-// @version      3.17.0
+// @version      3.18.0
 // @description  Sunoの作曲フォームにプリセットを保存・自動入力するツール
 // @author       ハリたっく
 // @match        https://suno.com/*
@@ -344,11 +344,10 @@
       return parseInt(thumb.getAttribute('aria-valuenow') ?? '-1');
     };
 
-    // ---- ヘルパー: キーボードで1%ずつ精密調整 ----
+    // ---- ヘルパー: キーボードで1%ずつ精密調整（sleep(16)でReact batching回避）----
     const fineTune = async (currentVal) => {
       if (currentVal < 0 || currentVal === percent) return currentVal;
       const delta = percent - currentVal;
-      if (Math.abs(delta) > 60) return currentVal; // 差が大きすぎる場合はスキップ
 
       const key  = delta > 0 ? 'ArrowRight' : 'ArrowLeft';
       const code = delta > 0 ? 39 : 37;
@@ -358,22 +357,31 @@
       thumb.focus();
       await sleep(60);
 
-      const focused = document.activeElement === thumb;
-      console.log(`[SunoAutoFill] fine-tune: delta=${delta}, focused=${focused}`);
+      console.log(`[SunoAutoFill] fine-tune: current=${currentVal}, target=${percent}, delta=${delta}`);
 
-      for (let i = 0; i < Math.abs(delta) + 1; i++) {
+      // React 18 自動バッチング対策: 各キー押下の間に await sleep(16) を挟む
+      for (let i = 0; i < Math.abs(delta); i++) {
         thumb.dispatchEvent(new KeyboardEvent('keydown', {
           key, keyCode: code, code: key, bubbles: true, cancelable: true, composed: true
         }));
-        thumb.dispatchEvent(new KeyboardEvent('keyup',   {
+        thumb.dispatchEvent(new KeyboardEvent('keyup', {
           key, keyCode: code, code: key, bubbles: true, cancelable: true, composed: true
         }));
+        await sleep(16); // ← React が各ステップを個別に処理できるよう1フレーム待つ
       }
-      await sleep(200);
+      await sleep(100);
       return parseInt(thumb.getAttribute('aria-valuenow') ?? '-1');
     };
 
-    // 方法①: トラッククリック → 値がずれていたらキーボードで補正
+    // 方法①: キーボード直接（現在値から目標値まで1%ずつ移動）
+    // React 18バッチング対策済み: sleep(16)で各ステップを個別処理
+    const keyResult = await fineTune(beforeVal);
+    console.log(`[SunoAutoFill] keyboard-direct: target=${percent}, result=${keyResult}`);
+    if (keyResult >= 0 && Math.abs(keyResult - percent) <= 3) {
+      return { ok: true, method: `keyboard→${keyResult}` };
+    }
+
+    // 方法②: トラッククリック → 値がずれていたらキーボードで補正
     if (await setSliderByTrackClick(thumb, percent)) {
       const after1 = await waitForChange(beforeVal);
       console.log(`[SunoAutoFill] track-click: target=${percent}, after=${after1}`);
@@ -381,25 +389,21 @@
       if (after1 >= 0 && Math.abs(after1 - percent) <= 3) {
         return { ok: true, method: `track-click→${after1}` };
       }
-      // 少しでも動いていたらキーボードで追い込む
-      if (after1 >= 0 && after1 !== beforeVal) {
+      if (after1 >= 0) {
         const tuned = await fineTune(after1);
-        console.log(`[SunoAutoFill] fine-tune result: ${tuned}`);
         if (tuned >= 0 && Math.abs(tuned - percent) <= 3) {
-          return { ok: true, method: `track-click+key→${tuned}` };
+          return { ok: true, method: `click+key→${tuned}` };
         }
       }
     }
 
-    // 方法②: ドラッグシミュレーション → 同様にキーボード補正
+    // 方法③: ドラッグシミュレーション → キーボード補正
     if (await setSliderByDrag(thumb, percent)) {
       const after2 = await waitForChange(beforeVal);
-      console.log(`[SunoAutoFill] drag: target=${percent}, after=${after2}`);
-
       if (after2 >= 0 && Math.abs(after2 - percent) <= 3) {
         return { ok: true, method: `drag→${after2}` };
       }
-      if (after2 >= 0 && after2 !== beforeVal) {
+      if (after2 >= 0) {
         const tuned = await fineTune(after2);
         if (tuned >= 0 && Math.abs(tuned - percent) <= 3) {
           return { ok: true, method: `drag+key→${tuned}` };
@@ -407,8 +411,8 @@
       }
     }
 
-    // 方法③: キーボードのみ（Home→ArrowRight×N）
-    if (await setRadixSliderRelative(thumb, percent)) return { ok: true, method: 'keyboard' };
+    // 方法④: Home→ArrowRight×N（絶対移動）
+    if (await setRadixSliderRelative(thumb, percent)) return { ok: true, method: 'home-keyboard' };
 
     // 方法④: React fiber の onValueChange を直接呼ぶ
     const sliderRoot = thumb.closest('[data-radix-slider-root]') || (() => {
@@ -661,13 +665,14 @@
       console.log(`[SunoAutoFill] keyboard: before=${before}, atZero=${atZero}, homeWorked=${homeWorked}`);
 
       if (homeWorked) {
-        // 絶対移動: 0 → percent 回 ArrowRight
+        // 絶対移動: 0 → percent 回 ArrowRight（sleep(16)でReact batching回避）
         for (let i = 0; i < percent; i++) {
           thumb.dispatchEvent(kd('ArrowRight', 39));
           thumb.dispatchEvent(ku('ArrowRight', 39));
+          await sleep(16);
         }
       } else {
-        // Home が効かなかった → 現在値から相対移動
+        // Home が効かなかった → 現在値から相対移動（sleep(16)でReact batching回避）
         const delta = percent - before;
         if (delta === 0) return true;
         const key = delta > 0 ? 'ArrowRight' : 'ArrowLeft';
@@ -675,6 +680,7 @@
         for (let i = 0; i < Math.abs(delta); i++) {
           thumb.dispatchEvent(kd(key, code));
           thumb.dispatchEvent(ku(key, code));
+          await sleep(16);
         }
       }
 
