@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Suno AutoFill（プリセット自動入力）
 // @namespace    https://github.com/sasakama99/suno-auto-selector
-// @version      3.15.0
+// @version      3.16.0
 // @description  Sunoの作曲フォームにプリセットを保存・自動入力するツール
 // @author       ハリたっく
 // @match        https://suno.com/*
@@ -388,51 +388,75 @@
   }
 
   // ① トラックの目標位置を直接クリック（Radixのtrack-clickで値を設定）
+  // Radix は「root に pointerdown を受け取り、track の rect で位置→値を計算」する
   async function setSliderByTrackClick(thumb, percent) {
     try {
-      // トラック要素を探す
       const root = thumb.closest('[data-radix-slider-root]') || thumb.parentElement;
+      // Radix が内部で参照するトラック要素を特定
       const track = root?.querySelector('[data-radix-slider-track]')
-                 || root?.querySelector('[data-orientation="horizontal"]')
+                 || root?.querySelector('[data-orientation="horizontal"]:not([data-radix-slider-thumb])')
                  || root;
 
-      const rect = track.getBoundingClientRect();
-      if (rect.width === 0) return false;
+      const trackRect = track.getBoundingClientRect();
+      if (trackRect.width === 0) return false;
 
-      const x = rect.left + rect.width * (percent / 100);
-      const y = rect.top + rect.height / 2;
+      // Radix の値計算式: value = (clientX - trackLeft) / trackWidth * 100
+      // → target percent のための clientX = trackLeft + trackWidth * (percent/100)
+      const x = trackRect.left + trackRect.width * (percent / 100);
+      const y  = trackRect.top + trackRect.height / 2;
 
-      const pOpts = (btns) => ({
+      console.log(`[SunoAutoFill] track-click: target=${percent}%, x=${x.toFixed(1)}, trackL=${trackRect.left.toFixed(1)}, trackW=${trackRect.width.toFixed(1)}`);
+
+      // pointerdown は ROOT に送る（Radix のハンドラが root に付いている）
+      const pDown = (btns) => new PointerEvent('pointerdown', {
         bubbles: true, cancelable: true, composed: true,
         clientX: x, clientY: y,
-        pointerId: 1, pointerType: 'mouse', isPrimary: true,
-        button: 0, buttons: btns
+        pointerId: 1, pointerType: 'mouse', isPrimary: true, button: 0, buttons: btns
       });
-      const mOpts = (btns) => ({
+      const pUp = (btns) => new PointerEvent('pointerup', {
         bubbles: true, cancelable: true, composed: true,
-        clientX: x, clientY: y, button: 0, buttons: btns
+        clientX: x, clientY: y,
+        pointerId: 1, pointerType: 'mouse', isPrimary: true, button: 0, buttons: btns
+      });
+      const pMove = (btns) => new PointerEvent('pointermove', {
+        bubbles: true, cancelable: true, composed: true,
+        clientX: x, clientY: y,
+        pointerId: 1, pointerType: 'mouse', isPrimary: true, button: 0, buttons: btns
       });
 
-      // elementFromPoint で実際にその座標にある要素を取得
-      const elAtPoint = document.elementFromPoint(x, y);
-      const target = (elAtPoint && !document.getElementById('suno-af-panel')?.contains(elAtPoint))
-                   ? elAtPoint : track;
-
-      console.log(`[SunoAutoFill] track-click: x=${x.toFixed(0)}, trackWidth=${rect.width.toFixed(0)}, elTag=${target.tagName}`);
-
-      target.dispatchEvent(new PointerEvent('pointerover',  pOpts(1)));
-      target.dispatchEvent(new PointerEvent('pointerenter', pOpts(1)));
-      target.dispatchEvent(new PointerEvent('pointerdown',  pOpts(1)));
-      target.dispatchEvent(new MouseEvent  ('mousedown',    mOpts(1)));
+      root.dispatchEvent(pDown(1));
       await sleep(30);
-      target.dispatchEvent(new PointerEvent('pointermove',  pOpts(1)));
+      root.dispatchEvent(pMove(1));
       await sleep(20);
-      target.dispatchEvent(new PointerEvent('pointerup',    pOpts(0)));
-      target.dispatchEvent(new MouseEvent  ('mouseup',      mOpts(0)));
-      target.dispatchEvent(new MouseEvent  ('click',        mOpts(0)));
-      // document にも pointerup を流す（ポインターキャプチャ対策）
-      document.dispatchEvent(new PointerEvent('pointerup',  pOpts(0)));
-      document.dispatchEvent(new MouseEvent  ('mouseup',    mOpts(0)));
+      root.dispatchEvent(pUp(0));
+      document.dispatchEvent(pUp(0)); // キャプチャされた場合の保険
+
+      // 値がずれていたら、実際のマッピングから補正して再クリック
+      await sleep(100);
+      const after1 = parseInt(thumb.getAttribute('aria-valuenow') ?? '-1');
+      if (after1 >= 0 && after1 !== percent && Math.abs(after1 - percent) > 3) {
+        // after1 = (x - trackLeft) / trackWidth * 100  だったはずが after1 になった
+        // → 実際の有効幅を逆算して補正
+        const currentX = x;
+        // Radixが使っているのはtrack幅と異なる可能性 → 補正係数を計算
+        // after1 = (currentX - trackLeft) / effectiveWidth * 100
+        const effectiveWidth = (currentX - trackRect.left) / (after1 / 100);
+        const correctedX = trackRect.left + effectiveWidth * (percent / 100);
+        console.log(`[SunoAutoFill] adaptive: after1=${after1}, effectiveW=${effectiveWidth.toFixed(1)}, corrX=${correctedX.toFixed(1)}`);
+
+        const mkP = (type, cx, btns) => new PointerEvent(type, {
+          bubbles: true, cancelable: true, composed: true,
+          clientX: cx, clientY: y,
+          pointerId: 1, pointerType: 'mouse', isPrimary: true, button: 0, buttons: btns
+        });
+        root.dispatchEvent(mkP('pointerdown', correctedX, 1));
+        await sleep(30);
+        root.dispatchEvent(mkP('pointermove', correctedX, 1));
+        await sleep(20);
+        root.dispatchEvent(mkP('pointerup',   correctedX, 0));
+        document.dispatchEvent(mkP('pointerup', correctedX, 0));
+      }
+
       return true;
     } catch(e) {
       console.log('[SunoAutoFill] track-click error:', e);
@@ -466,39 +490,32 @@
         clientX: x, clientY: y, button: 0, buttons: btns
       });
 
-      // pointerdown on thumb
+      // pointerdown は root に送る（Radixのハンドラはrootに付いている）
       const pdOpts = {
         bubbles: true, cancelable: true, composed: true,
         clientX: startX, clientY: startY,
         pointerId: 1, pointerType: 'mouse', isPrimary: true, button: 0, buttons: 1
       };
-      thumb.dispatchEvent(new PointerEvent('pointerdown', pdOpts));
-      thumb.dispatchEvent(new MouseEvent('mousedown', { ...pdOpts }));
+      root.dispatchEvent(new PointerEvent('pointerdown', pdOpts));
       await sleep(30);
 
-      // pointermove - 段階的にターゲットへ
+      // pointermove - root と document に段階的に送る
       for (let i = 1; i <= steps; i++) {
         const x = startX + (targetX - startX) * (i / steps);
-        // thumb, track, root, document すべてに送る（どれがリスナーかわからないため）
-        for (const el of [thumb, track, root]) {
-          if (el) el.dispatchEvent(po(x, startY, 1));
-          if (el) el.dispatchEvent(mo(x, startY, 1));
-        }
-        document.dispatchEvent(po(targetX, startY, 1));
-        document.dispatchEvent(mo(targetX, startY, 1));
+        root.dispatchEvent(po(x, startY, 1));
+        root.dispatchEvent(mo(x, startY, 1));
+        document.dispatchEvent(po(x, startY, 1));
+        document.dispatchEvent(mo(x, startY, 1));
         await sleep(12);
       }
 
-      // pointerup - 全要素に送る
+      // pointerup - root と document に送る
       const puOpts = {
         bubbles: true, cancelable: true, composed: true,
         clientX: targetX, clientY: startY,
         pointerId: 1, pointerType: 'mouse', isPrimary: true, button: 0, buttons: 0
       };
-      for (const el of [thumb, track, root]) {
-        if (el) el.dispatchEvent(new PointerEvent('pointerup', puOpts));
-        if (el) el.dispatchEvent(new MouseEvent('mouseup', { ...puOpts }));
-      }
+      root.dispatchEvent(new PointerEvent('pointerup', puOpts));
       document.dispatchEvent(new PointerEvent('pointerup', puOpts));
       document.dispatchEvent(new MouseEvent('mouseup', { ...puOpts }));
 
@@ -1085,6 +1102,8 @@
       const r = await setSlider('Weirdness', p.weirdness);
       results.push([`Weirdness(${r.method})`, r.ok]);
     }
+    // Weirdness操作後のReact再レンダリングが完了するまで待つ
+    await sleep(500);
     if (p.styleInfluence !== undefined) {
       const r = await setSlider('Style Influence', p.styleInfluence);
       results.push([`Influence(${r.method})`, r.ok]);
