@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Suno AutoFill（プリセット自動入力）
 // @namespace    https://github.com/sasakama99/suno-auto-selector
-// @version      3.20.0
+// @version      3.21.0
 // @description  Sunoの作曲フォームにプリセットを保存・自動入力するツール
 // @author       ハリたっく
 // @match        https://suno.com/*
@@ -1250,7 +1250,7 @@
     // CSS注入
     const css = document.createElement('style');
     css.textContent = `
-      #suno-af-panel { position:fixed;top:10px;left:50%;transform:translateX(-50%);z-index:9999998;width:310px;
+      #suno-af-panel { position:fixed;top:10px;right:10px;z-index:9999998;width:310px;
         background:rgba(13,13,13,.98);border:1px solid #2a2a2a;border-radius:14px;
         box-shadow:0 8px 32px rgba(0,0,0,.8);
         font-family:-apple-system,"Hiragino Sans",sans-serif;color:#e0e0e0;font-size:13px;}
@@ -1508,6 +1508,7 @@
       _dy = e.clientY - r.top;
       hd.classList.add('dragging');
       panel.style.transform = '';
+      panel.style.right = 'auto';
       panel.style.left = r.left + 'px';
       panel.style.top  = r.top  + 'px';
       e.preventDefault();
