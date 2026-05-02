@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Suno AutoFill（プリセット自動入力）
 // @namespace    https://github.com/sasakama99/suno-auto-selector
-// @version      3.14.0
+// @version      3.15.0
 // @description  Sunoの作曲フォームにプリセットを保存・自動入力するツール
 // @author       ハリたっく
 // @match        https://suno.com/*
@@ -285,7 +285,8 @@
 
   // =========================================================
   //  スライダー設定（Radix UI対応）
-  //  優先順: React fiber(root→上へ) → キーボード → トラックPointer
+  //  優先順: ①トラッククリック ②ドラッグシミュレーション
+  //         ③React fiber直呼び ④キーボード
   // =========================================================
   async function setSlider(labelText, percent) {
     const ln = norm(labelText);
@@ -305,7 +306,7 @@
     console.log(`[SunoAutoFill] setSlider "${labelText}": ${allThumbs.length}個のサム検出`);
     allThumbs.forEach((el, i) => {
       const rootEl = el.closest('[data-radix-slider-root]') || el.parentElement;
-      console.log(`  [${i}] valuenow=${el.getAttribute('aria-valuenow')} label="${el.getAttribute('aria-label')}" parentText="${(rootEl?.textContent||'').trim().slice(0,50)}"`);
+      console.log(`  [${i}] valuenow=${el.getAttribute('aria-valuenow')} label="${el.getAttribute('aria-label')}" parentText="${(rootEl?.textContent||'').trim().slice(0,60)}"`);
     });
 
     // ラベルマッチでサムを特定
@@ -328,63 +329,184 @@
       console.log(`[SunoAutoFill] setSlider: サム未検出 "${labelText}"`);
       return { ok: false, method: 'no-thumb' };
     }
-    console.log(`[SunoAutoFill] setSlider: target=${percent}, currentValueNow=${thumb.getAttribute('aria-valuenow')}`);
+    console.log(`[SunoAutoFill] setSlider: target=${percent}, valuenow=${thumb.getAttribute('aria-valuenow')}`);
 
-    // スライダールート要素を特定（Reactハンドラの起点）
-    let sliderRoot = thumb.closest('[data-radix-slider-root]');
-    if (!sliderRoot) {
-      for (let el = thumb.parentElement; el && el !== document.body; el = el.parentElement) {
-        if (el.querySelector('[data-radix-slider-track]') && el.querySelector('[data-radix-slider-thumb]')) {
-          sliderRoot = el; break;
-        }
-      }
+    // 方法①: トラックの目標位置に直接クリック（最も自然な操作）
+    if (await setSliderByTrackClick(thumb, percent)) {
+      await sleep(120);
+      const after = parseInt(thumb.getAttribute('aria-valuenow') ?? '-1');
+      console.log(`[SunoAutoFill] track-click: target=${percent}, after=${after}`);
+      if (after >= 0 && Math.abs(after - percent) <= 3) return { ok: true, method: 'track-click' };
     }
-    const reactBase = sliderRoot || thumb;
 
-    // 方法①: React fiber の onValueChange を root から上方向へ探して直呼び
-    // Radix Slider は onValueChange(number[]) を期待する
-    const tryReactFiber = async () => {
-      for (let el = reactBase; el && el !== document.body; el = el.parentElement) {
-        const key = reactKey(el);
-        if (!key) continue;
-        let f = el[key];
-        while (f) {
-          const props = f.memoizedProps || f.pendingProps;
-          if (props) {
-            for (const evName of ['onValueChange', 'onValueCommit']) {
-              const h = props[evName];
-              if (typeof h === 'function') {
-                try {
-                  h([percent]);
-                  await sleep(150);
-                  const after = parseInt(thumb.getAttribute('aria-valuenow') ?? '-1');
-                  console.log(`[SunoAutoFill] react-fiber(${evName}): target=${percent}, after=${after}`);
-                  if (after >= 0 && Math.abs(after - percent) <= 3) return true;
-                } catch(e) {}
-              }
+    // 方法②: サムを現在位置から目標位置へドラッグシミュレーション
+    if (await setSliderByDrag(thumb, percent)) {
+      await sleep(150);
+      const after = parseInt(thumb.getAttribute('aria-valuenow') ?? '-1');
+      console.log(`[SunoAutoFill] drag: target=${percent}, after=${after}`);
+      if (after >= 0 && Math.abs(after - percent) <= 3) return { ok: true, method: 'drag' };
+    }
+
+    // 方法③: React fiber の onValueChange を root から上方向へ探して直呼び
+    const sliderRoot = thumb.closest('[data-radix-slider-root]') || (() => {
+      for (let el = thumb.parentElement; el && el !== document.body; el = el.parentElement) {
+        if (el.querySelector('[data-radix-slider-track]')) return el;
+      }
+      return null;
+    })() || thumb;
+
+    for (let el = sliderRoot; el && el !== document.body; el = el.parentElement) {
+      const key = reactKey(el);
+      if (!key) continue;
+      let f = el[key];
+      while (f) {
+        const props = f.memoizedProps || f.pendingProps;
+        if (props) {
+          for (const evName of ['onValueChange', 'onValueCommit']) {
+            const h = props[evName];
+            if (typeof h === 'function') {
+              try {
+                h([percent]);
+                await sleep(150);
+                const after = parseInt(thumb.getAttribute('aria-valuenow') ?? '-1');
+                console.log(`[SunoAutoFill] react-fiber(${evName}): target=${percent}, after=${after}`);
+                if (after >= 0 && Math.abs(after - percent) <= 3) return { ok: true, method: 'react-fiber' };
+              } catch(e) {}
             }
           }
-          f = f.return;
         }
+        f = f.return;
       }
-      return false;
-    };
-    if (await tryReactFiber()) return { ok: true, method: 'react-fiber' };
-
-    // 方法②: キーボード（Home→ArrowRight×N）
-    if (await setRadixSliderRelative(thumb, percent)) return { ok: true, method: 'keyboard' };
-
-    // 方法③: トラックへのPointerイベント
-    if (setRadixSliderByTrackPointer(thumb, percent)) {
-      await sleep(100);
-      const after = parseInt(thumb.getAttribute('aria-valuenow') ?? '-1');
-      console.log(`[SunoAutoFill] track-pointer: target=${percent}, after=${after}`);
-      if (after >= 0 && Math.abs(after - percent) <= 3) return { ok: true, method: 'track-pointer' };
     }
+
+    // 方法④: キーボード（Home→ArrowRight×N）
+    if (await setRadixSliderRelative(thumb, percent)) return { ok: true, method: 'keyboard' };
 
     const finalVal = parseInt(thumb.getAttribute('aria-valuenow') ?? '-1');
     console.log(`[SunoAutoFill] 全方法失敗: target=${percent}, final=${finalVal}`);
     return { ok: false, method: 'all-failed' };
+  }
+
+  // ① トラックの目標位置を直接クリック（Radixのtrack-clickで値を設定）
+  async function setSliderByTrackClick(thumb, percent) {
+    try {
+      // トラック要素を探す
+      const root = thumb.closest('[data-radix-slider-root]') || thumb.parentElement;
+      const track = root?.querySelector('[data-radix-slider-track]')
+                 || root?.querySelector('[data-orientation="horizontal"]')
+                 || root;
+
+      const rect = track.getBoundingClientRect();
+      if (rect.width === 0) return false;
+
+      const x = rect.left + rect.width * (percent / 100);
+      const y = rect.top + rect.height / 2;
+
+      const pOpts = (btns) => ({
+        bubbles: true, cancelable: true, composed: true,
+        clientX: x, clientY: y,
+        pointerId: 1, pointerType: 'mouse', isPrimary: true,
+        button: 0, buttons: btns
+      });
+      const mOpts = (btns) => ({
+        bubbles: true, cancelable: true, composed: true,
+        clientX: x, clientY: y, button: 0, buttons: btns
+      });
+
+      // elementFromPoint で実際にその座標にある要素を取得
+      const elAtPoint = document.elementFromPoint(x, y);
+      const target = (elAtPoint && !document.getElementById('suno-af-panel')?.contains(elAtPoint))
+                   ? elAtPoint : track;
+
+      console.log(`[SunoAutoFill] track-click: x=${x.toFixed(0)}, trackWidth=${rect.width.toFixed(0)}, elTag=${target.tagName}`);
+
+      target.dispatchEvent(new PointerEvent('pointerover',  pOpts(1)));
+      target.dispatchEvent(new PointerEvent('pointerenter', pOpts(1)));
+      target.dispatchEvent(new PointerEvent('pointerdown',  pOpts(1)));
+      target.dispatchEvent(new MouseEvent  ('mousedown',    mOpts(1)));
+      await sleep(30);
+      target.dispatchEvent(new PointerEvent('pointermove',  pOpts(1)));
+      await sleep(20);
+      target.dispatchEvent(new PointerEvent('pointerup',    pOpts(0)));
+      target.dispatchEvent(new MouseEvent  ('mouseup',      mOpts(0)));
+      target.dispatchEvent(new MouseEvent  ('click',        mOpts(0)));
+      // document にも pointerup を流す（ポインターキャプチャ対策）
+      document.dispatchEvent(new PointerEvent('pointerup',  pOpts(0)));
+      document.dispatchEvent(new MouseEvent  ('mouseup',    mOpts(0)));
+      return true;
+    } catch(e) {
+      console.log('[SunoAutoFill] track-click error:', e);
+      return false;
+    }
+  }
+
+  // ② サムを現在位置から目標位置まで段階的にドラッグ
+  async function setSliderByDrag(thumb, percent) {
+    try {
+      const thumbRect = thumb.getBoundingClientRect();
+      if (thumbRect.width === 0) return false;
+
+      const root  = thumb.closest('[data-radix-slider-root]') || thumb.parentElement;
+      const track = root?.querySelector('[data-radix-slider-track]') || root;
+      const trackRect = track.getBoundingClientRect();
+      if (trackRect.width === 0) return false;
+
+      const startX = thumbRect.left + thumbRect.width / 2;
+      const startY = thumbRect.top  + thumbRect.height / 2;
+      const targetX = trackRect.left + trackRect.width * (percent / 100);
+      const steps = 8; // ドラッグのステップ数
+
+      const po = (x, y, btns) => new PointerEvent('pointermove', {
+        bubbles: true, cancelable: true, composed: true,
+        clientX: x, clientY: y,
+        pointerId: 1, pointerType: 'mouse', isPrimary: true, button: 0, buttons: btns
+      });
+      const mo = (x, y, btns) => new MouseEvent('mousemove', {
+        bubbles: true, cancelable: true, composed: true,
+        clientX: x, clientY: y, button: 0, buttons: btns
+      });
+
+      // pointerdown on thumb
+      const pdOpts = {
+        bubbles: true, cancelable: true, composed: true,
+        clientX: startX, clientY: startY,
+        pointerId: 1, pointerType: 'mouse', isPrimary: true, button: 0, buttons: 1
+      };
+      thumb.dispatchEvent(new PointerEvent('pointerdown', pdOpts));
+      thumb.dispatchEvent(new MouseEvent('mousedown', { ...pdOpts }));
+      await sleep(30);
+
+      // pointermove - 段階的にターゲットへ
+      for (let i = 1; i <= steps; i++) {
+        const x = startX + (targetX - startX) * (i / steps);
+        // thumb, track, root, document すべてに送る（どれがリスナーかわからないため）
+        for (const el of [thumb, track, root]) {
+          if (el) el.dispatchEvent(po(x, startY, 1));
+          if (el) el.dispatchEvent(mo(x, startY, 1));
+        }
+        document.dispatchEvent(po(targetX, startY, 1));
+        document.dispatchEvent(mo(targetX, startY, 1));
+        await sleep(12);
+      }
+
+      // pointerup - 全要素に送る
+      const puOpts = {
+        bubbles: true, cancelable: true, composed: true,
+        clientX: targetX, clientY: startY,
+        pointerId: 1, pointerType: 'mouse', isPrimary: true, button: 0, buttons: 0
+      };
+      for (const el of [thumb, track, root]) {
+        if (el) el.dispatchEvent(new PointerEvent('pointerup', puOpts));
+        if (el) el.dispatchEvent(new MouseEvent('mouseup', { ...puOpts }));
+      }
+      document.dispatchEvent(new PointerEvent('pointerup', puOpts));
+      document.dispatchEvent(new MouseEvent('mouseup', { ...puOpts }));
+
+      return true;
+    } catch(e) {
+      console.log('[SunoAutoFill] drag error:', e);
+      return false;
+    }
   }
 
   // サムを現在位置からターゲット位置までドラッグするシミュレーション
