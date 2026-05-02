@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Suno AutoFill（プリセット自動入力）
 // @namespace    https://github.com/sasakama99/suno-auto-selector
-// @version      3.21.0
+// @version      3.22.0
 // @description  Sunoの作曲フォームにプリセットを保存・自動入力するツール
 // @author       ハリたっく
 // @match        https://suno.com/*
@@ -279,12 +279,8 @@
   //         ③React fiber直呼び ④キーボード
   // =========================================================
   async function setSlider(labelText, percent) {
-    // スライダーは合成イベントでは操作不可（Radix setPointerCapture クラッシュ）
-    // → Chrome拡張版で対応。Tampermonkey版ではスキップ。
-    console.log(`[SunoAutoFill] setSlider "${labelText}" (${percent}%): スキップ（Chrome拡張で操作してください）`);
-    return { ok: false, method: 'skip' };
-
-    // --- 以下は参考用（使用停止） ---
+    // ⚠️ ポインターイベントは絶対に使わない（Radix setPointerCaptureクラッシュ防止）
+    // → キーボード方式のみ + React fiber直呼びフォールバック
     const ln = norm(labelText);
     const panel = document.getElementById('suno-af-panel');
 
@@ -1110,16 +1106,18 @@
       results.push(['Auto',   b ? realClick(b) : false]);
     }
 
-    // スライダー（スキップ — Chrome拡張で対応）
-    const needSlider = (p.weirdness !== undefined && p.weirdness !== 50) ||
-                       (p.styleInfluence !== undefined && p.styleInfluence !== 50);
-    if (needSlider) {
-      const w = p.weirdness ?? 50;
-      const s = p.styleInfluence ?? 50;
-      showToast(`🎚️ スライダーは手動で設定してください\nWeirdness: ${w}%　Style Influence: ${s}%`, 5000);
+    // スライダー（MoreOptions が完全にレンダリングされるまで待機）
+    await sleep(800);
+    if (p.weirdness !== undefined) {
+      const r = await setSlider('Weirdness', p.weirdness);
+      results.push([`Weirdness(${r.method})`, r.ok]);
     }
-    if (p.weirdness !== undefined) results.push([`Weirdness(skip)`, false]);
-    if (p.styleInfluence !== undefined) results.push([`Influence(skip)`, false]);
+    // Weirdness操作後のReact再レンダリングが完了するまで待つ
+    await sleep(500);
+    if (p.styleInfluence !== undefined) {
+      const r = await setSlider('Style Influence', p.styleInfluence);
+      results.push([`Influence(${r.method})`, r.ok]);
+    }
 
     // バージョン
     if (p.version && p.version !== 'none') {
